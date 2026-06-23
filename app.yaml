@@ -1,0 +1,13 @@
+command:
+  - streamlit
+  - run
+  - app.py
+
+env:
+  # Streamlit sits behind the Databricks Apps reverse proxy
+  # (*.databricksapps.com), whose origin differs from the workspace origin.
+  # Both CORS and XSRF protection must be off or the UI fails to load.
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"
