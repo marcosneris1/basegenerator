@@ -4,6 +4,8 @@ A Streamlit app that generates Databricks **Scala notebooks** for building custo
 
 The user clicks through a checklist; each enabled option appends a specific Scala fragment to the rendered notebook. The output is a downloadable `.scala` file ready to import into Databricks via **File → Import**. Fully deterministic — no LLM, no description parsing.
 
+**▶️ Open the hosted app:** https://base-generator-2093534396923660.aws.databricksapps.com (no install — see [Hosted app](#hosted-app-no-install)).
+
 ## Files
 
 | File | Role |
@@ -54,37 +56,21 @@ The browser opens automatically at `http://localhost:8501`. If it doesn't, copy 
 
 Next time you only need steps 2 → 3 → 4.
 
-### Databricks Apps (shared — no download/install for users)
+### Hosted app (no install)
 
-Goal: host the code in Git, run it as a single Databricks App, and share only
-the app URL. End users click a link — they never clone, download, or install
-anything.
+The app is already running on Databricks. Nothing to download or install:
 
-The repo already ships the two files the platform needs:
+**👉 [base-generator](https://base-generator-2093534396923660.aws.databricksapps.com)**
 
-- `app.yaml` — start command (`streamlit run app.py`) + the CORS/XSRF env vars
-  Streamlit needs behind the Databricks Apps proxy.
-- `.databricksignore` — keeps `.venv/`, caches, and `.DS_Store` out of the sync.
+How to open it:
 
-**One-time setup**
+1. Click the link above (or paste it into your browser):
+   `https://base-generator-2093534396923660.aws.databricksapps.com`
+2. If prompted, sign in with your **Nubank Databricks** account (the usual SSO).
+3. Wait a few seconds for the app to load, then start clicking through the checklist.
 
-1. **Put the code in Git.** Push `app.py`, `lib.py`, `requirements.txt`,
-   `app.yaml`, and `.databricksignore` to a repo.
-2. **Add a Git folder in the workspace:** **Workspace → Repos → Add repo**, point
-   it at the repository. (This is what makes future updates a `git pull` instead
-   of a re-upload.)
-3. **Create the app:** **Compute → Apps → Create app → Custom**. Point it at the
-   Git-folder path that contains `app.yaml`. Start it.
-4. **Share it:** open the app → **Permissions** → grant the target group
-   **Can use**. They open the app URL and use it directly.
-
-**Updating later**
-
-Pull the latest commit into the Git folder (or let CI sync it), then redeploy
-the app. No user action required.
-
-No secrets, no MCP, no external APIs — the app only renders text and touches
-zero data, so the deployed app needs no data entitlements.
+> Don't have access? Ask the app owner to grant you **Can use** on the
+> `base-generator` app in Databricks (**Compute → Apps → base-generator → Permissions**).
 
 ## What the app does
 

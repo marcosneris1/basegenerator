@@ -70,13 +70,19 @@ streamlit run app.py
 
 The browser opens at `http://localhost:8501`. Stop with `Ctrl + C` in the Terminal.
 
-### Databricks Apps
+### Hosted app (no install)
 
-1. In the workspace: **Compute → Apps → Create app**.
-2. Point the app at a folder containing `app.py`, `lib.py`, and `requirements.txt`.
-3. Start the app and open its URL.
+The app is deployed on Databricks Apps — most users never run it locally, they just open the link:
 
-No secrets, no external APIs — just the three files.
+**https://base-generator-2093534396923660.aws.databricksapps.com**
+
+How to open it:
+
+1. Click the link (or paste it into your browser).
+2. If prompted, sign in with your **Nubank Databricks** account (SSO).
+3. Wait for the app to load, then use the checklist.
+
+Need access? The app owner grants **Can use** under **Compute → Apps → base-generator → Permissions**.
 
 ---
 
