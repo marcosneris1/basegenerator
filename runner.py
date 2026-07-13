@@ -52,26 +52,39 @@ def sdk_available() -> bool:
         return False
 
 
-def _client():
-    """Build a WorkspaceClient with fast, environment-appropriate auth.
+def is_deployed() -> bool:
+    """True when running inside a Databricks App (SP env vars are injected)."""
+    import os
 
-    - **Deployed as a Databricks App** (service-principal env vars present): use
-      the SDK default chain — the injected credentials are found immediately.
+    return bool(
+        os.getenv("DATABRICKS_CLIENT_ID")
+        or os.getenv("DATABRICKS_APP_NAME")
+        or os.getenv("DATABRICKS_APP_PORT")
+    )
+
+
+def _client(user_token: str | None = None):
+    """Build a WorkspaceClient with the right identity for the environment.
+
+    - **Deployed app + `user_token`** (on-behalf-of-user): authenticate AS the
+      logged-in user via their forwarded access token, so Unity Catalog / cluster
+      permissions match what the user has (no PII access granted to the app's
+      service principal). The token must be read fresh per request, never cached.
+    - **Deployed app, no token**: fall back to the injected service principal.
     - **Local dev**: pin the CLI profile so the SDK does NOT walk the whole
-      default auth chain, which can stall for many minutes probing cloud-metadata
-      endpoints (e.g. `169.254.169.254`) before falling back to the profile.
-      Override the profile with `DATABRICKS_CONFIG_PROFILE` if yours differs.
+      default auth chain, which can stall for minutes probing cloud-metadata
+      endpoints before falling back to the profile. Override with
+      `DATABRICKS_CONFIG_PROFILE`.
     """
     import os
 
     from databricks.sdk import WorkspaceClient
 
-    deployed = bool(
-        os.getenv("DATABRICKS_CLIENT_ID")
-        or os.getenv("DATABRICKS_APP_NAME")
-        or os.getenv("DATABRICKS_APP_PORT")
-    )
-    if deployed:
+    if user_token:
+        host = os.getenv("DATABRICKS_HOST")
+        return WorkspaceClient(host=host, token=user_token)
+
+    if is_deployed():
         return WorkspaceClient()
 
     profile = os.getenv("DATABRICKS_CONFIG_PROFILE") or "Marcos Neris"
@@ -82,13 +95,13 @@ def _client():
         return WorkspaceClient()
 
 
-def list_clusters() -> list[tuple[str, str, str]]:
+def list_clusters(user_token: str | None = None) -> list[tuple[str, str, str]]:
     """Return (name, id, state) for clusters visible to the current identity.
 
     Interactive execution needs the cluster **running**, so `state` is the
     useful signal here (jobs workload no longer matters).
     """
-    w = _client()
+    w = _client(user_token)
     out: list[tuple[str, str, str]] = []
     for c in w.clusters.list():
         state = c.state.value if c.state else ""
@@ -251,9 +264,9 @@ def _find_csv_in_dir(w, csv_dir: str) -> tuple[str, int | None] | None:
     return None
 
 
-def download_csv(file_path: str) -> bytes:
+def download_csv(file_path: str, user_token: str | None = None) -> bytes:
     """Download a CSV file from a UC Volume, retrying transient blips."""
-    w = _client()
+    w = _client(user_token)
     transient = _transient_exc_types()
     last: Exception | None = None
     for attempt in range(5):
@@ -389,10 +402,13 @@ def run_interactive(
     volume_dir: str,
     progress: Callable[[str], None] | None = None,
     timeout_min: int = 60,
+    user_token: str | None = None,
 ) -> RunResult:
     """Run the generated Scala interactively on `cluster_id` and export CSVs.
 
     `progress(msg)` — optional callback for UI updates (per-cell status).
+    `user_token` — forwarded user access token for on-behalf-of-user auth in the
+    deployed app; when set, the run executes with the user's identity.
     """
     from databricks.sdk.service.compute import Language
 
@@ -402,10 +418,20 @@ def run_interactive(
         if progress:
             progress(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
+    if is_deployed() and not user_token:
+        return RunResult(
+            "ERROR",
+            "This deployed app needs **user authorization** (on-behalf-of-user) "
+            "to run as you. No forwarded user token was found.\n\n"
+            "→ An admin must enable it: App **settings → Authorization → User "
+            "authorization**, add scopes for compute + files, then **fully stop "
+            "and start** the app (a redeploy alone doesn't apply it).",
+        )
+
     _say("Authenticating to Databricks…")
     t_auth = time.time()
     try:
-        w = _client()
+        w = _client(user_token)
     except Exception as e:
         return RunResult("ERROR", f"Could not authenticate to Databricks: {e}")
     _say(f"  authenticated in {_fmt_secs(time.time() - t_auth)}")

@@ -764,6 +764,17 @@ else:
         + (" — one CSV each." if len(tables) > 1 else " — one CSV.")
     )
 
+    def _user_token():
+        """Forwarded user access token for on-behalf-of-user auth (deployed app).
+
+        Read fresh every call — never cache it (tokens rotate per request). Returns
+        None locally, where the SDK uses your CLI profile instead.
+        """
+        try:
+            return st.context.headers.get("x-forwarded-access-token")
+        except Exception:
+            return None
+
     def _require_runner():
         """Import runner and verify the SDK is present, or stop with a message."""
         try:
@@ -789,7 +800,7 @@ else:
             runner = _require_runner()
             try:
                 with st.spinner("Fetching clusters…"):
-                    clusters = runner.list_clusters()
+                    clusters = runner.list_clusters(user_token=_user_token())
                 if clusters:
                     st.dataframe(
                         [
@@ -833,6 +844,7 @@ else:
                     cluster_id=cluster_id.strip(),
                     volume_dir=volume_dir.strip(),
                     progress=status.write,
+                    user_token=_user_token(),
                 )
                 _wall = runner._fmt_secs(_time.time() - _wall0)
                 # Stamp the clock the instant control returns. If this time is far
@@ -889,7 +901,9 @@ else:
                             )
                             t0 = _time.perf_counter()
                             try:
-                                cache[path] = runner.download_csv(path)
+                                cache[path] = runner.download_csv(
+                                    path, user_token=_user_token()
+                                )
                             except Exception as e:
                                 dstatus.write(f"✗ {name}.csv failed: {e}")
                                 continue

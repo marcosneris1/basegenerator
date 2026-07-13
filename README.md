@@ -172,13 +172,23 @@ How it works in code:
 - `lib.render_scala_with_csv_export(cfg, volume_dir)` / `lib.render_csv_export_cells(...)` — pure renderers that append the export cells.
 - `runner.py` — UI-agnostic execution layer: parse cells → inline `%run` → run each cell via the Command Execution API → locate/download CSV. The Databricks SDK is imported lazily, so the rest of the app still works without it.
 
-**Auth & permissions.** Auth uses the Databricks SDK default chain: the injected
-**service principal** when deployed as a Databricks App, or your local profile
-when running locally. The identity needs:
+**Auth & permissions.** The run executes as a Databricks identity, and *that*
+identity needs the access — not you personally:
+
+- **Local dev:** the SDK uses your CLI profile (`Marcos Neris`, override with `DATABRICKS_CONFIG_PROFILE`). The profile is pinned to avoid the slow default-auth provider probing.
+- **Deployed app:** it runs **on behalf of the logged-in user** via the forwarded `x-forwarded-access-token`, so permissions match what each user already has (no PII access is granted to the app's service principal).
+
+The executing identity needs:
 
 - Permission to **execute on the cluster** (attach / run commands).
 - **Read** on the source datasets and the `%run` helpers notebook (it's exported to be inlined).
 - **READ VOLUME + WRITE VOLUME** on the UC Volume.
+
+**Enabling on-behalf-of-user on the deployed app (one-time, admin):**
+
+1. Workspace admin: enable the **On-Behalf-Of User Authorization** preview (account/workspace previews).
+2. App → **settings → Authorization → User authorization** → **+ Add scope**; add scopes covering **compute/clusters, command execution, and files** (`files.files` for the Volume). If unsure, allow **All APIs** at the workspace *OAuth scopes for apps* setting.
+3. **Fully stop and start** the app (a redeploy alone does **not** apply the new auth model). First use prompts each user to consent.
 
 **⚠️ PII / compliance.** This runs against production data and exports a full
 base (personal data — CPF/CNPJ, tags) to CSV. Only run authorized, reviewed
