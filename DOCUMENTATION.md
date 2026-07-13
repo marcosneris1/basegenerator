@@ -41,9 +41,10 @@ Design principles:
 
 | File | Role |
 |------|------|
-| `app.py` | Streamlit UI — sidebar (country, names, templates) + two-column checklist + advanced-settings expander + validation panel + live Scala preview & download. No business logic. |
-| `lib.py` | **Pure logic**: constants, default configs, templates, validation, Scala renderer. **Zero Streamlit imports** — importable and unit-testable from anywhere. |
-| `requirements.txt` | Single dependency: `streamlit>=1.30`. |
+| `app.py` | Streamlit UI — sidebar (country, names, templates) + two-column checklist + advanced-settings expander + validation panel + live Scala preview & download + **Run on Databricks** section. No business logic. |
+| `lib.py` | **Pure logic**: constants, default configs, templates, validation, Scala renderer (incl. CSV-export cells). **Zero Streamlit imports** — importable and unit-testable from anywhere. |
+| `runner.py` | **Execution layer** (beta): runs the generated Scala **interactively** on an existing cluster via the Command Execution API (inlining `%run` helpers), then downloads the result CSV(s) from a UC Volume. Works on interactive-only clusters. UI-agnostic; Databricks SDK imported lazily. |
+| `requirements.txt` | `streamlit>=1.30`, `databricks-sdk>=0.30`. |
 | `README.md` | Quick-start overview. |
 | `.venv/` | Local virtual environment (not versioned). |
 

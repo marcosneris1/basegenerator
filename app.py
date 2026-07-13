@@ -28,7 +28,9 @@ from lib import (
     get_template,
     multi_save_combos,
     multi_save_names,
+    output_table_names,
     render_scala,
+    render_scala_with_csv_export,
     summarize_config,
     template_names,
     validate_config,
@@ -716,3 +718,193 @@ else:
                joins, renegotiations) still need manual editing
             """
         )
+
+    # -----------------------------------------------------------------------
+    # Run on Databricks → CSV (beta)
+    # -----------------------------------------------------------------------
+    st.divider()
+    st.subheader("⚡ Run on Databricks & export CSV (beta)")
+
+    st.warning(
+        "This **executes** the generated notebook on a cluster against production "
+        "data and writes the full result as CSV. The output contains personal data "
+        "(PII) — only run authorized, reviewed bases.",
+        icon="⚠️",
+    )
+
+    tables = output_table_names(cfg)
+
+    st.caption(
+        "Runs **interactively** (execution context) on the cluster — so "
+        "interactive-only clusters work. The cluster must be **running**."
+    )
+
+    with st.form("run_form"):
+        cluster_id = st.text_input(
+            "Existing cluster (ID or name)",
+            value=st.session_state.get("run_cluster_id", ""),
+            placeholder="0123-456789-abcdefgh  or  my-cluster-name",
+            help="A running cluster you can execute on. Accepts the cluster ID "
+            "or its display name. Use the expander below to list clusters.",
+        )
+        volume_dir = st.text_input(
+            "UC Volume output directory",
+            value=st.session_state.get("run_volume_dir", ""),
+            placeholder="/Volumes/<catalog>/<schema>/<volume>/base_generator",
+            help="A Unity Catalog Volume path the app's identity can write to. "
+            "One subfolder per table is created here.",
+        )
+        submitted = st.form_submit_button(
+            "▶️ Run & build CSV", type="primary", use_container_width=True
+        )
+
+    st.caption(
+        "Will produce: "
+        + ", ".join(f"`{t}`" for t in tables)
+        + (" — one CSV each." if len(tables) > 1 else " — one CSV.")
+    )
+
+    def _require_runner():
+        """Import runner and verify the SDK is present, or stop with a message."""
+        try:
+            import runner as _r
+        except ImportError:
+            st.error(
+                "`databricks-sdk` is not installed. `pip install -r requirements.txt` "
+                "and restart."
+            )
+            st.stop()
+        if not _r.sdk_available():
+            st.error(
+                "`databricks-sdk` isn't installed in this environment, so the app "
+                "can't reach Databricks.\n\n"
+                "- **Local run:** `pip install -r requirements.txt`, then restart.\n"
+                "- **Deployed app:** redeploy so it reinstalls `requirements.txt`."
+            )
+            st.stop()
+        return _r
+
+    with st.expander("🔎 List clusters I can use"):
+        if st.button("Load clusters"):
+            runner = _require_runner()
+            try:
+                with st.spinner("Fetching clusters…"):
+                    clusters = runner.list_clusters()
+                if clusters:
+                    st.dataframe(
+                        [
+                            {"name": n, "id": cid, "state": state}
+                            for n, cid, state in clusters
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(
+                        "Use a cluster in **state = RUNNING** — copy its **id** "
+                        "(or name) into the field above."
+                    )
+                else:
+                    st.info("No clusters visible to this identity.")
+            except Exception as e:
+                st.error(f"Couldn't list clusters: {e}")
+
+    if submitted:
+        if not cluster_id.strip():
+            st.error("Enter a cluster ID or name.")
+        elif not volume_dir.strip():
+            st.error("Enter a UC Volume output directory.")
+        else:
+            st.session_state["run_cluster_id"] = cluster_id.strip()
+            st.session_state["run_volume_dir"] = volume_dir.strip()
+
+            runner = _require_runner()
+            source = render_scala_with_csv_export(cfg, volume_dir.strip())
+
+            import time as _time
+
+            _wall0 = _time.time()
+            with st.status(
+                f"Running on {cluster_id.strip()}…", expanded=True
+            ) as status:
+                status.write(f"[{_time.strftime('%H:%M:%S')}] starting run…")
+                result = runner.run_interactive(
+                    source,
+                    tables,
+                    cluster_id=cluster_id.strip(),
+                    volume_dir=volume_dir.strip(),
+                    progress=status.write,
+                )
+                _wall = runner._fmt_secs(_time.time() - _wall0)
+                # Stamp the clock the instant control returns. If this time is far
+                # ahead of the last "cleanup done" line, the OS paused the process
+                # (system sleep / App Nap) during the idle return path.
+                status.write(
+                    f"[{_time.strftime('%H:%M:%S')}] back in app "
+                    f"(⏱️ total wall-clock: {_wall})"
+                )
+                status.update(
+                    label=f"Run finished in {_wall}" if result.ok else "Run failed",
+                    state="complete" if result.ok else "error",
+                    expanded=not result.ok,
+                )
+
+            # Persist the outcome so the download buttons survive the reruns
+            # that Streamlit triggers on each download click (otherwise only the
+            # first CSV — the one clicked — would ever be downloadable).
+            st.session_state["last_run"] = {
+                "ok": result.ok,
+                "message": result.message,
+                "csv_paths": dict(result.csv_files),
+                "csv_sizes": dict(result.csv_sizes),
+                "volume_dir": volume_dir.strip(),
+            }
+            st.session_state["csv_bytes"] = {}  # fresh download cache per run
+
+    # --- Result (rendered every rerun from session state) --------------------
+    last = st.session_state.get("last_run")
+    if last is not None:
+        if last["ok"]:
+            st.success("CSV(s) ready below — download any/all; they stay here.")
+            if not last["csv_paths"]:
+                st.warning(
+                    "The run succeeded but no CSV was found in the Volume "
+                    f"(`{last.get('volume_dir', '')}`). Check the code / Volume path."
+                )
+            else:
+                runner = _require_runner()
+                cache = st.session_state.setdefault("csv_bytes", {})
+                sizes = last.get("csv_sizes", {})
+                to_fetch = {n: p for n, p in last["csv_paths"].items() if p not in cache}
+                if to_fetch:
+                    import time as _time
+
+                    with st.status(
+                        "Downloading CSV(s) from the Volume…", expanded=True
+                    ) as dstatus:
+                        for name, path in to_fetch.items():
+                            sz = runner._fmt_size(sizes.get(name)) if sizes else ""
+                            dstatus.write(
+                                f"▶ Downloading {name}.csv"
+                                + (f" ({sz})…" if sz else "…")
+                            )
+                            t0 = _time.perf_counter()
+                            try:
+                                cache[path] = runner.download_csv(path)
+                            except Exception as e:
+                                dstatus.write(f"✗ {name}.csv failed: {e}")
+                                continue
+                            dt = runner._fmt_secs(_time.perf_counter() - t0)
+                            dstatus.write(f"✓ {name}.csv — {dt}")
+                        dstatus.update(label="Download finished", state="complete")
+                for name, path in last["csv_paths"].items():
+                    if path not in cache:
+                        continue
+                    st.download_button(
+                        f"💾 Download {name}.csv",
+                        cache[path],
+                        file_name=f"{name}.csv",
+                        mime="text/csv",
+                        key=f"dl_{name}",
+                    )
+        else:
+            st.error(last["message"])

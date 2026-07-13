@@ -1536,3 +1536,42 @@ def render_scala(cfg: dict) -> str:
     parts.extend(_render_base_block(cfg))
     parts.extend(_render_save_block(cfg))
     return "\n".join(parts)
+
+
+def output_table_names(cfg: dict) -> list[str]:
+    """Table names the notebook will `.save(...)` — 1 for single-save, N for
+    multi-save. Thin alias over `multi_save_names` for callers that read more
+    naturally as 'output tables' (e.g. the CSV export / runner)."""
+    return multi_save_names(cfg)
+
+
+def render_csv_export_cells(cfg: dict, volume_dir: str) -> str:
+    """Render the CSV-export cells appended after the save block.
+
+    For each output table, read it back and write a single header CSV under
+    `<volume_dir>/<table>/`. `coalesce(1)` forces one part-file so the app can
+    download a single CSV per table. Pure text — no Streamlit, no Spark — like
+    the rest of `lib`.
+    """
+    vol = volume_dir.rstrip("/")
+    L: list[str] = []
+    for name in output_table_names(cfg):
+        L.append("// COMMAND ----------")
+        L.append("")
+        L.append(f'table("{name}")')
+        L.append("  .coalesce(1)")
+        L.append('  .write.option("header", "true")')
+        L.append('  .mode("overwrite")')
+        L.append(f'  .csv("{vol}/{name}")')
+        L.append("")
+    return "\n".join(L)
+
+
+def render_scala_with_csv_export(cfg: dict, volume_dir: str) -> str:
+    """Full notebook source + CSV-export cells, for in-app execution.
+
+    The bases are built and `.save(...)`d exactly as in the downloadable
+    `.scala`; the only addition is the trailing export cells that write each
+    table out as CSV to the given UC Volume directory.
+    """
+    return render_scala(cfg) + "\n\n" + render_csv_export_cells(cfg, volume_dir)

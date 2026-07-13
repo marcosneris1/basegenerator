@@ -144,6 +144,47 @@ Five templates are available from the sidebar:
 
 Each template returns a fresh config copy from `default_config(country)` and overrides the relevant fields, so templates can't be mutated by accident.
 
+## Run on Databricks & export CSV (beta)
+
+Beyond downloading the `.scala`, the app can **execute** the generated notebook
+on a cluster and hand you the full result as CSV. Section **⚡ Run on Databricks
+& export CSV** (below the generated code) takes:
+
+- **Existing cluster ID** — an all-purpose cluster the app's identity can attach to.
+- **UC Volume output directory** — e.g. `/Volumes/<catalog>/<schema>/<volume>/base_generator`; one subfolder per table is written here.
+- **Workspace folder** — where the run notebook is imported before running.
+- **Timeout** — how long to wait for the run.
+
+What happens on **Run & build CSV** (runs **interactively**, via execution
+contexts — the same mechanism a notebook cell uses):
+
+1. The generated notebook (code + a CSV-export cell per table) is split into cells; any `%run` helper notebook is **inlined** (its source is fetched and its cells run first, so `datasets()`, `.save()`, `maximo`, … are defined).
+2. An execution context is opened on the cluster and each cell runs in order (state persists across cells).
+3. Each output table is written as a single header CSV (`coalesce(1)`) to the Volume.
+4. The app downloads each CSV from the Volume and offers a browser **Download** button.
+
+Because it runs interactively rather than as a Jobs run, this works on
+**interactive-only clusters** (jobs workload disabled). The cluster must be
+**running**.
+
+How it works in code:
+
+- `lib.render_scala_with_csv_export(cfg, volume_dir)` / `lib.render_csv_export_cells(...)` — pure renderers that append the export cells.
+- `runner.py` — UI-agnostic execution layer: parse cells → inline `%run` → run each cell via the Command Execution API → locate/download CSV. The Databricks SDK is imported lazily, so the rest of the app still works without it.
+
+**Auth & permissions.** Auth uses the Databricks SDK default chain: the injected
+**service principal** when deployed as a Databricks App, or your local profile
+when running locally. The identity needs:
+
+- Permission to **execute on the cluster** (attach / run commands).
+- **Read** on the source datasets and the `%run` helpers notebook (it's exported to be inlined).
+- **READ VOLUME + WRITE VOLUME** on the UC Volume.
+
+**⚠️ PII / compliance.** This runs against production data and exports a full
+base (personal data — CPF/CNPJ, tags) to CSV. Only run authorized, reviewed
+bases. For very large bases, `coalesce(1)` forces a single file through one
+task — consider leaving it partitioned and downloading parts instead.
+
 ## Validation
 
 `lib.validate_config(cfg)` returns `(errors, warnings)`. Errors block code generation; warnings are advisory. Notable checks:
@@ -174,5 +215,7 @@ Each template returns a fresh config copy from `default_config(country)` and ove
 
 - Window functions, multi-source joins, renegotiation logic, and cure events are out of scope — generate the skeleton, then edit manually.
 - The `FORBIDDEN_TAGS_BR` / `FORBIDDEN_TAGS_MX` lists are hardcoded — drift risk over time. If this becomes shared tooling, move them to a versioned source.
-- No automatic upload to the workspace — the app produces a downloadable `.scala`, then the user imports it manually via Databricks **File → Import**.
+- Manual path: the app produces a downloadable `.scala` to import via Databricks **File → Import**. The **Run on Databricks (beta)** section can instead run it for you interactively and export CSV (see above).
+- In-app execution is **synchronous and client-driven** — the app runs the cells one by one and blocks until they finish (with per-cell progress). Closing the app stops the run; there's no background queue or run history yet.
+- Interactive execution needs a **running** cluster; it won't start a stopped one.
 - All state lives in `st.session_state`; nothing is persisted between sessions.
