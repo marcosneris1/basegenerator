@@ -81,8 +81,12 @@ def _client(user_token: str | None = None):
     from databricks.sdk import WorkspaceClient
 
     if user_token:
+        # In the deployed app the service-principal OAuth env vars
+        # (DATABRICKS_CLIENT_ID/SECRET) are also present, so passing a token as
+        # well trips the SDK's "more than one authorization method" guard.
+        # `auth_type="pat"` pins it to the user token and ignores the env OAuth.
         host = os.getenv("DATABRICKS_HOST")
-        return WorkspaceClient(host=host, token=user_token)
+        return WorkspaceClient(host=host, token=user_token, auth_type="pat")
 
     if is_deployed():
         return WorkspaceClient()
