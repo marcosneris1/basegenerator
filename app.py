@@ -772,7 +772,7 @@ else:
         "BASE_GENERATOR_VOLUME", "/Volumes/usr/basegenerator/base_generator_volume/"
     )
     _DEFAULT_NB_DIR = _os.getenv(
-        "BASE_GENERATOR_NOTEBOOK_DIR", "/Workspace/Shared/base_generator/runs"
+        "BASE_GENERATOR_NOTEBOOK_DIR", "/Shared/base_generator/runs"
     )
 
     mode = st.radio(

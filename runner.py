@@ -566,6 +566,24 @@ def run_interactive(
 # --- job run (Databricks App → service principal + resources) -------------
 
 
+def _normalize_ws_path(path: str) -> str:
+    """Return a workspace-object path (namespace root `/`), not a file mount path.
+
+    `dbutils.notebook.run` and the Workspace REST API address notebooks under the
+    workspace object tree (`/Shared/…`, `/Users/…`), NOT the `/Workspace` FUSE
+    mount used for file access. A stray `/Workspace` prefix makes the Job fail
+    with "Unable to access the notebook", so strip it and ensure a leading `/`.
+    """
+    p = (path or "").strip()
+    if p.startswith("/Workspace/"):
+        p = p[len("/Workspace"):]
+    elif p == "/Workspace":
+        p = "/"
+    if not p.startswith("/"):
+        p = "/" + p
+    return p
+
+
 def _sanitize_segment(s: str) -> str:
     """Make a workspace/volume path segment safe (letters, digits, `_`, `-`)."""
     keep = [c if (c.isalnum() or c in "_-") else "_" for c in (s or "")]
@@ -666,7 +684,7 @@ def run_via_job(
 
     run_id = _run_id(w)
     vol_dir = f"{volume_base.rstrip('/')}/{run_id}"
-    nb_path = f"{notebook_dir.rstrip('/')}/{run_id}"
+    nb_path = f"{_normalize_ws_path(notebook_dir).rstrip('/')}/{run_id}"
 
     _say(f"Rendering notebook (CSV → {vol_dir})…")
     try:

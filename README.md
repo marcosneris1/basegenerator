@@ -159,7 +159,7 @@ CSV(s). It runs as the app's **service principal** using *resource grants*, so
 
 - **Job ID** — the Job to trigger (attach it to the app as a resource). Default `109425859584826`.
 - **UC Volume base directory** — e.g. `/Volumes/usr/basegenerator/base_generator_volume/`; each run writes to a **per-run subfolder** (`<user>_<timestamp>`), so simultaneous runs never collide.
-- **Workspace folder** — where the per-run notebook is written before the Job runs it. Default `/Workspace/Shared/base_generator/runs`.
+- **Workspace folder** — where the per-run notebook is written before the Job runs it. Default `/Shared/base_generator/runs` (a workspace-object path — do **not** prefix it with `/Workspace`).
 - **Timeout** — how long to wait for the Job run.
 
 What happens on **Run via Job & build CSV**:
@@ -172,7 +172,7 @@ What happens on **Run via Job & build CSV**:
 **Setup (one-time):**
 
 - **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py` (from this repo, ideally Git-sourced). Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** on the Volume. Set `max_concurrent_runs` to 10–20 so multiple users can run at once.
-- **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ/WRITE VOLUME** on the Volume. The service principal also needs **write** on the workspace folder.
+- **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ/WRITE VOLUME** on the Volume. The service principal also needs **write** on the workspace folder (`/Shared/base_generator/runs`), and the Job's **run-as identity** needs **read** on it (so it can run the per-run notebook the app wrote).
 - Optionally override the defaults with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME`, `BASE_GENERATOR_NOTEBOOK_DIR`.
 
 ### Mode 2 — Interactive (existing cluster)
