@@ -771,9 +771,6 @@ else:
     _DEFAULT_VOLUME = _os.getenv(
         "BASE_GENERATOR_VOLUME", "/Volumes/usr/basegenerator/base_generator_volume/"
     )
-    _DEFAULT_NB_DIR = _os.getenv(
-        "BASE_GENERATOR_NOTEBOOK_DIR", "/Shared/base_generator/runs"
-    )
 
     mode = st.radio(
         "Execution mode",
@@ -795,9 +792,10 @@ else:
 
     if mode.startswith("Via Job"):
         st.caption(
-            "Triggers a pre-configured Databricks **Job**. The app writes a per-run "
-            "notebook, runs the Job, then downloads the CSV(s) the Job wrote to the "
-            "Volume. Concurrent runs are isolated in per-run subfolders."
+            "Triggers a pre-configured Databricks **Job**. The app hands it the "
+            "generated notebook inline; the Job builds the base and writes the "
+            "CSV(s) to the Volume, then the app downloads them. Concurrent runs "
+            "are isolated in per-run subfolders."
         )
         with st.form("job_form"):
             job_id = st.text_input(
@@ -812,12 +810,6 @@ else:
                 help="Root Volume path. Each run writes its CSV(s) to a per-run "
                 "subfolder here — so simultaneous runs never overwrite each other.",
             )
-            notebook_dir = st.text_input(
-                "Workspace folder for generated notebooks",
-                value=st.session_state.get("run_nb_dir", _DEFAULT_NB_DIR),
-                help="Where the per-run notebook is written before the Job runs it. "
-                "The running identity must have write access here.",
-            )
             timeout_min_job = st.number_input(
                 "Timeout (minutes)", min_value=5, max_value=240, value=60, step=5
             )
@@ -831,12 +823,9 @@ else:
                 st.error("Enter a Job ID.")
             elif not volume_base.strip():
                 st.error("Enter a UC Volume base directory.")
-            elif not notebook_dir.strip():
-                st.error("Enter a workspace folder for the generated notebooks.")
             else:
                 st.session_state["run_job_id"] = job_id.strip()
                 st.session_state["run_volume_base"] = volume_base.strip()
-                st.session_state["run_nb_dir"] = notebook_dir.strip()
 
                 runner = _require_runner()
 
@@ -855,7 +844,6 @@ else:
                         tables,
                         job_id=job_id.strip(),
                         volume_base=volume_base.strip(),
-                        notebook_dir=notebook_dir.strip(),
                         progress=status.write,
                         timeout_min=int(timeout_min_job),
                         # Job + Volume are granted to the app's service principal

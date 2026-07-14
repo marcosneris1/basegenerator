@@ -566,24 +566,6 @@ def run_interactive(
 # --- job run (Databricks App → service principal + resources) -------------
 
 
-def _normalize_ws_path(path: str) -> str:
-    """Return a workspace-object path (namespace root `/`), not a file mount path.
-
-    `dbutils.notebook.run` and the Workspace REST API address notebooks under the
-    workspace object tree (`/Shared/…`, `/Users/…`), NOT the `/Workspace` FUSE
-    mount used for file access. A stray `/Workspace` prefix makes the Job fail
-    with "Unable to access the notebook", so strip it and ensure a leading `/`.
-    """
-    p = (path or "").strip()
-    if p.startswith("/Workspace/"):
-        p = p[len("/Workspace"):]
-    elif p == "/Workspace":
-        p = "/"
-    if not p.startswith("/"):
-        p = "/" + p
-    return p
-
-
 def _sanitize_segment(s: str) -> str:
     """Make a workspace/volume path segment safe (letters, digits, `_`, `-`)."""
     keep = [c if (c.isalnum() or c in "_-") else "_" for c in (s or "")]
@@ -600,86 +582,6 @@ def _run_id(w) -> str:
     except Exception:
         pass
     return f"{_sanitize_segment(who)}_{time.strftime('%Y%m%d_%H%M%S')}"
-
-
-def _write_notebook(w, path: str, scala_source: str) -> None:
-    """Import `scala_source` as a Scala SOURCE notebook at `path` (overwrite)."""
-    from databricks.sdk.service.workspace import ImportFormat, Language
-
-    parent = path.rsplit("/", 1)[0]
-    try:
-        w.workspace.mkdirs(parent)
-    except Exception:
-        pass
-    content = base64.b64encode(scala_source.encode("utf-8")).decode("ascii")
-    w.workspace.import_(
-        path=path,
-        format=ImportFormat.SOURCE,
-        language=Language.SCALA,
-        content=content,
-        overwrite=True,
-    )
-
-
-def _job_run_as(w, job_id: int | str, say) -> str | None:
-    """The identity the Job executes as (its run-as user, else its creator)."""
-    try:
-        job = w.jobs.get(job_id=int(job_id))
-        return getattr(job, "run_as_user_name", None) or getattr(
-            job, "creator_user_name", None
-        )
-    except Exception as e:
-        say(f"  ! could not read the Job's run-as identity: {e}")
-        return None
-
-
-def _grant_object(w, obj_type: str, path: str, run_as: str, say) -> None:
-    """Grant `run_as` CAN_MANAGE on one workspace object (notebook or folder)."""
-    from databricks.sdk.service.workspace import (
-        WorkspaceObjectAccessControlRequest,
-        WorkspaceObjectPermissionLevel,
-    )
-
-    try:
-        obj_id = getattr(w.workspace.get_status(path), "object_id", None)
-    except Exception as e:
-        say(f"  ! {obj_type[:-1]} not found ({path}): {e}")
-        return
-    if obj_id is None:
-        return
-
-    is_sp = "@" not in run_as
-    acr = WorkspaceObjectAccessControlRequest(
-        permission_level=WorkspaceObjectPermissionLevel.CAN_MANAGE,
-        service_principal_name=run_as if is_sp else None,
-        user_name=None if is_sp else run_as,
-    )
-    try:
-        w.workspace.update_permissions(
-            workspace_object_type=obj_type,
-            workspace_object_id=str(obj_id),
-            access_control_list=[acr],
-        )
-        say(f"  granted {obj_type[:-1]} access to run-as {run_as} ({path})")
-    except Exception as e:
-        say(f"  ! could not grant {obj_type[:-1]} access on {path}: {e}")
-
-
-def _grant_run_as_access(w, nb_path: str, notebook_dir: str, job_id, say) -> None:
-    """Let the Job's run-as identity read/run the just-written notebook.
-
-    The app's service principal creates the notebook, so by default only it can
-    access the object; the Job runs as a *different* identity, which then can't
-    read it (`Unable to access the notebook … lacks the required permissions`).
-    As owner, the SP grants that identity CAN_MANAGE — on both the notebook and
-    its parent folder (folder grants are inherited, covering future runs too).
-    Best-effort: if it fails we proceed and surface the reason.
-    """
-    run_as = _job_run_as(w, job_id, say)
-    if not run_as:
-        return
-    _grant_object(w, "directories", _normalize_ws_path(notebook_dir), run_as, say)
-    _grant_object(w, "notebooks", nb_path, run_as, say)
 
 
 def _job_error_detail(w, run) -> str:
@@ -713,7 +615,6 @@ def run_via_job(
     *,
     job_id: int | str,
     volume_base: str,
-    notebook_dir: str,
     progress: Callable[[str], None] | None = None,
     timeout_min: int = 60,
     user_token: str | None = None,
@@ -721,15 +622,18 @@ def run_via_job(
     """Run the generated notebook via a pre-configured Databricks **Job**.
 
     Designed for the deployed app: the app's **service principal** (with the Job
-    and UC Volume attached as *resources*) writes a per-run notebook, triggers the
-    Job with `run_now`, waits for it to finish, then downloads the CSV(s) the Job
-    wrote to the Volume. No on-behalf-of-user OAuth scopes are needed.
+    and UC Volume attached as *resources*) hands the generated notebook to the
+    Job *inline* via `run_now`, waits for it to finish, then downloads the CSV(s)
+    the Job wrote to the Volume. No on-behalf-of-user OAuth scopes are needed.
+
+    The Job (`job_runner.py`) writes the notebook to the **run-as user's own home**
+    and runs it, so the identity that creates the notebook is the one that runs it
+    — no cross-identity workspace ACLs to manage.
 
     - `render_source(volume_dir)` → the full Scala notebook source, already wired to
       write its CSV(s) under `volume_dir`. Called once the per-run dir is known.
     - `job_id` — the Job to trigger (attached to the app as a resource).
     - `volume_base` — Volume root, e.g. `/Volumes/usr/basegenerator/base_generator_volume/`.
-    - `notebook_dir` — workspace folder for the generated per-run notebooks.
     """
     from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
 
@@ -745,7 +649,6 @@ def run_via_job(
 
     run_id = _run_id(w)
     vol_dir = f"{volume_base.rstrip('/')}/{run_id}"
-    nb_path = f"{_normalize_ws_path(notebook_dir).rstrip('/')}/{run_id}"
 
     _say(f"Rendering notebook (CSV → {vol_dir})…")
     try:
@@ -753,29 +656,30 @@ def run_via_job(
     except Exception as e:
         return RunResult("ERROR", f"Failed to render the notebook: {e}")
 
-    _say(f"Writing notebook to {nb_path}…")
-    try:
-        _write_notebook(w, nb_path, source)
-    except Exception as e:
+    # Pass the generated notebook to the Job *inline* (base64), not as a path.
+    # The Job (`job_runner.py`) writes it to the run-as user's own home and runs
+    # it, so the identity that creates the notebook is the one that runs it — no
+    # cross-identity workspace ACLs to manage.
+    import json
+
+    source_b64 = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    params = {
+        "source_b64": source_b64,
+        "run_id": run_id,
+        "timeout_seconds": str(int(timeout_min * 60)),
+    }
+    # Databricks caps the notebook_params JSON at ~10,000 bytes.
+    if len(json.dumps(params).encode("utf-8")) > 9500:
         return RunResult(
             "ERROR",
-            f"Could not write the notebook to the workspace: {e}\n\n"
-            f"→ The running identity needs write access to `{notebook_dir}`.",
+            "The generated notebook is too large to hand to the Job inline "
+            "(the parameter limit is ~10 KB). Use **Interactive** mode for this "
+            "base, or trim the number of columns / saves.",
         )
 
-    # The Job runs as a different identity than the SP that wrote the notebook,
-    # so grant it access (otherwise the Job can't read the notebook).
-    _grant_run_as_access(w, nb_path, notebook_dir, job_id, _say)
-
-    _say(f"Triggering Job {job_id}…")
+    _say(f"Triggering Job {job_id} (run {run_id})…")
     try:
-        waiter = w.jobs.run_now(
-            job_id=int(job_id),
-            notebook_params={
-                "notebook_path": nb_path,
-                "timeout_seconds": str(int(timeout_min * 60)),
-            },
-        )
+        waiter = w.jobs.run_now(job_id=int(job_id), notebook_params=params)
         job_run_id = waiter.run_id
     except Exception as e:
         return RunResult("ERROR", f"Could not trigger the Job: {e}")

@@ -159,21 +159,23 @@ CSV(s). It runs as the app's **service principal** using *resource grants*, so
 
 - **Job ID** — the Job to trigger (attach it to the app as a resource). Default `109425859584826`.
 - **UC Volume base directory** — e.g. `/Volumes/usr/basegenerator/base_generator_volume/`; each run writes to a **per-run subfolder** (`<user>_<timestamp>`), so simultaneous runs never collide.
-- **Workspace folder** — where the per-run notebook is written before the Job runs it. Default `/Shared/base_generator/runs` (a workspace-object path — do **not** prefix it with `/Workspace`).
 - **Timeout** — how long to wait for the Job run.
 
 What happens on **Run via Job & build CSV**:
 
-1. The app renders the notebook (code + a CSV-export cell per table, wired to the per-run Volume subfolder) and imports it to the workspace folder.
-2. The app calls `run_now` on the Job, passing the notebook path as a parameter.
-3. The Job's task (`job_runner.py`) runs the generated notebook via `dbutils.notebook.run` on its cluster; each table is written as a single header CSV (`coalesce(1)`) to the Volume.
+1. The app renders the notebook (code + a CSV-export cell per table, wired to the per-run Volume subfolder) and passes it to the Job **inline** (base64) via `run_now`.
+2. The Job's task (`job_runner.py`) writes that notebook to the **run-as user's own home** and runs it via `dbutils.notebook.run`. Because the identity that *creates* the notebook is the one that *runs* it, there are no cross-identity workspace permissions to manage.
+3. Each table is written as a single header CSV (`coalesce(1)`) to the per-run Volume subfolder.
 4. The app polls the run to completion, then downloads each CSV and offers a browser **Download** button.
+
+The generated notebook must fit in the Job parameter limit (~10 KB); the app
+falls back with a clear message and you can use **Mode 2** for very large bases.
 
 **Setup (one-time):**
 
-- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py` (from this repo, ideally Git-sourced). Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** on the Volume. Set `max_concurrent_runs` to 10–20 so multiple users can run at once.
-- **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ/WRITE VOLUME** on the Volume. The service principal also needs **write** on the workspace folder (`/Shared/base_generator/runs`), and the Job's **run-as identity** needs **read** on it (so it can run the per-run notebook the app wrote).
-- Optionally override the defaults with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME`, `BASE_GENERATOR_NOTEBOOK_DIR`.
+- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py` (from this repo, ideally Git-sourced). Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume — it both runs the notebook and writes the CSV. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
+- **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ VOLUME** on the Volume (so the app can download the finished CSV).
+- Optionally override the defaults with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME`.
 
 ### Mode 2 — Interactive (existing cluster)
 

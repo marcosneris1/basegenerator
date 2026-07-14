@@ -44,7 +44,7 @@ Design principles:
 | `app.py` | Streamlit UI — sidebar (country, names, templates) + two-column checklist + advanced-settings expander + validation panel + live Scala preview & download + **Run on Databricks** section. No business logic. |
 | `lib.py` | **Pure logic**: constants, default configs, templates, validation, Scala renderer (incl. CSV-export cells). **Zero Streamlit imports** — importable and unit-testable from anywhere. |
 | `runner.py` | **Execution layer** (beta): two modes — `run_via_job(...)` triggers a pre-configured Databricks **Job** as the app's service principal (writes a per-run notebook, `run_now`, polls, downloads CSV from a UC Volume); `run_interactive(...)` runs the Scala cell-by-cell on an existing cluster via the Command Execution API (inlining `%run` helpers). UI-agnostic; Databricks SDK imported lazily. |
-| `job_runner.py` | Generic **Job task notebook**: reads a `notebook_path` widget and runs the app-generated notebook via `dbutils.notebook.run`. Point the Job's notebook task at this file. |
+| `job_runner.py` | Generic **Job task notebook**: reads the app-generated notebook inline (`source_b64` widget), writes it to the **run-as user's own home**, and runs it via `dbutils.notebook.run` (so the creator == the runner — no cross-identity ACLs). Point the Job's notebook task at this file. |
 | `requirements.txt` | `streamlit>=1.30`, `databricks-sdk>=0.30`. |
 | `README.md` | Quick-start overview. |
 | `.venv/` | Local virtual environment (not versioned). |
