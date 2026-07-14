@@ -621,6 +621,60 @@ def _write_notebook(w, path: str, scala_source: str) -> None:
     )
 
 
+def _grant_run_as_access(w, nb_path: str, job_id: int | str, say) -> None:
+    """Let the Job's run-as identity read/run the just-written notebook.
+
+    The app's service principal creates the notebook, so by default only it can
+    access the object. The Job runs as a different identity (its run-as user),
+    which then can't read the notebook (`Unable to access the notebook … lacks
+    the required permissions`). As the object owner, the SP grants that identity
+    CAN_MANAGE. Best-effort: if it fails we still proceed (folder ACLs may cover
+    it), but we surface the reason.
+    """
+    from databricks.sdk.service.workspace import (
+        WorkspaceObjectAccessControlRequest,
+        WorkspaceObjectPermissionLevel,
+    )
+
+    run_as = None
+    try:
+        job = w.jobs.get(job_id=int(job_id))
+        run_as = getattr(job, "run_as_user_name", None) or getattr(
+            job, "creator_user_name", None
+        )
+    except Exception as e:
+        say(f"  ! could not read the Job's run-as identity: {e}")
+
+    try:
+        status = w.workspace.get_status(nb_path)
+        obj_id = getattr(status, "object_id", None)
+    except Exception as e:
+        say(f"  ! notebook not found after writing ({nb_path}): {e}")
+        return
+
+    if not run_as or obj_id is None:
+        return
+
+    is_sp = "@" not in run_as
+    acr = WorkspaceObjectAccessControlRequest(
+        permission_level=WorkspaceObjectPermissionLevel.CAN_MANAGE,
+        service_principal_name=run_as if is_sp else None,
+        user_name=None if is_sp else run_as,
+    )
+    try:
+        w.workspace.update_permissions(
+            workspace_object_type="notebooks",
+            workspace_object_id=str(obj_id),
+            access_control_list=[acr],
+        )
+        say(f"  granted notebook access to run-as {run_as}")
+    except Exception as e:
+        say(
+            f"  ! could not grant notebook access to {run_as}: {e} "
+            "(grant read on the folder manually if the Job can't read it)"
+        )
+
+
 def _job_error_detail(w, run) -> str:
     """Best-effort concise error for a failed Job run (task output + message)."""
     msg = (getattr(getattr(run, "state", None), "state_message", None) or "").strip()
@@ -701,6 +755,10 @@ def run_via_job(
             f"Could not write the notebook to the workspace: {e}\n\n"
             f"→ The running identity needs write access to `{notebook_dir}`.",
         )
+
+    # The Job runs as a different identity than the SP that wrote the notebook,
+    # so grant it access (otherwise the Job can't read the notebook).
+    _grant_run_as_access(w, nb_path, job_id, _say)
 
     _say(f"Triggering Job {job_id}…")
     try:
