@@ -621,38 +621,31 @@ def _write_notebook(w, path: str, scala_source: str) -> None:
     )
 
 
-def _grant_run_as_access(w, nb_path: str, job_id: int | str, say) -> None:
-    """Let the Job's run-as identity read/run the just-written notebook.
+def _job_run_as(w, job_id: int | str, say) -> str | None:
+    """The identity the Job executes as (its run-as user, else its creator)."""
+    try:
+        job = w.jobs.get(job_id=int(job_id))
+        return getattr(job, "run_as_user_name", None) or getattr(
+            job, "creator_user_name", None
+        )
+    except Exception as e:
+        say(f"  ! could not read the Job's run-as identity: {e}")
+        return None
 
-    The app's service principal creates the notebook, so by default only it can
-    access the object. The Job runs as a different identity (its run-as user),
-    which then can't read the notebook (`Unable to access the notebook … lacks
-    the required permissions`). As the object owner, the SP grants that identity
-    CAN_MANAGE. Best-effort: if it fails we still proceed (folder ACLs may cover
-    it), but we surface the reason.
-    """
+
+def _grant_object(w, obj_type: str, path: str, run_as: str, say) -> None:
+    """Grant `run_as` CAN_MANAGE on one workspace object (notebook or folder)."""
     from databricks.sdk.service.workspace import (
         WorkspaceObjectAccessControlRequest,
         WorkspaceObjectPermissionLevel,
     )
 
-    run_as = None
     try:
-        job = w.jobs.get(job_id=int(job_id))
-        run_as = getattr(job, "run_as_user_name", None) or getattr(
-            job, "creator_user_name", None
-        )
+        obj_id = getattr(w.workspace.get_status(path), "object_id", None)
     except Exception as e:
-        say(f"  ! could not read the Job's run-as identity: {e}")
-
-    try:
-        status = w.workspace.get_status(nb_path)
-        obj_id = getattr(status, "object_id", None)
-    except Exception as e:
-        say(f"  ! notebook not found after writing ({nb_path}): {e}")
+        say(f"  ! {obj_type[:-1]} not found ({path}): {e}")
         return
-
-    if not run_as or obj_id is None:
+    if obj_id is None:
         return
 
     is_sp = "@" not in run_as
@@ -663,16 +656,30 @@ def _grant_run_as_access(w, nb_path: str, job_id: int | str, say) -> None:
     )
     try:
         w.workspace.update_permissions(
-            workspace_object_type="notebooks",
+            workspace_object_type=obj_type,
             workspace_object_id=str(obj_id),
             access_control_list=[acr],
         )
-        say(f"  granted notebook access to run-as {run_as}")
+        say(f"  granted {obj_type[:-1]} access to run-as {run_as} ({path})")
     except Exception as e:
-        say(
-            f"  ! could not grant notebook access to {run_as}: {e} "
-            "(grant read on the folder manually if the Job can't read it)"
-        )
+        say(f"  ! could not grant {obj_type[:-1]} access on {path}: {e}")
+
+
+def _grant_run_as_access(w, nb_path: str, notebook_dir: str, job_id, say) -> None:
+    """Let the Job's run-as identity read/run the just-written notebook.
+
+    The app's service principal creates the notebook, so by default only it can
+    access the object; the Job runs as a *different* identity, which then can't
+    read it (`Unable to access the notebook … lacks the required permissions`).
+    As owner, the SP grants that identity CAN_MANAGE — on both the notebook and
+    its parent folder (folder grants are inherited, covering future runs too).
+    Best-effort: if it fails we proceed and surface the reason.
+    """
+    run_as = _job_run_as(w, job_id, say)
+    if not run_as:
+        return
+    _grant_object(w, "directories", _normalize_ws_path(notebook_dir), run_as, say)
+    _grant_object(w, "notebooks", nb_path, run_as, say)
 
 
 def _job_error_detail(w, run) -> str:
@@ -758,7 +765,7 @@ def run_via_job(
 
     # The Job runs as a different identity than the SP that wrote the notebook,
     # so grant it access (otherwise the Job can't read the notebook).
-    _grant_run_as_access(w, nb_path, job_id, _say)
+    _grant_run_as_access(w, nb_path, notebook_dir, job_id, _say)
 
     _say(f"Triggering Job {job_id}…")
     try:
