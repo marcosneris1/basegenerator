@@ -1,9 +1,17 @@
 """Databricks execution layer for Base Generator.
 
-Runs the generated Scala **interactively** on an existing cluster using the
-Command Execution API (execution contexts) — the same mechanism a notebook cell
-uses. This works on interactive-only clusters (jobs workload disabled), unlike
-the Jobs API.
+Two ways to run the generated Scala and export CSV(s):
+
+1. **Via Job** (`run_via_job`) — the app writes a per-run notebook, triggers a
+   pre-configured Databricks **Job** (attached to the app as a resource) with
+   `run_now`, waits for it to finish, then downloads the CSV(s) the Job wrote to
+   a UC Volume. Runs as the app's **service principal** using resource grants,
+   so no on-behalf-of-user OAuth scopes are needed — best for the deployed app.
+
+2. **Interactive** (`run_interactive`) — runs the generated Scala on an existing
+   cluster using the Command Execution API (execution contexts), the same
+   mechanism a notebook cell uses. Works on interactive-only clusters (jobs
+   workload disabled), unlike the Jobs API.
 
 Flow:
   1. Open an execution context (Scala) on the cluster.
@@ -553,3 +561,204 @@ def run_interactive(
                 "  cleanup still running after 20s — moving on "
                 "(the context expires on its own)."
             )
+
+
+# --- job run (Databricks App → service principal + resources) -------------
+
+
+def _sanitize_segment(s: str) -> str:
+    """Make a workspace/volume path segment safe (letters, digits, `_`, `-`)."""
+    keep = [c if (c.isalnum() or c in "_-") else "_" for c in (s or "")]
+    seg = "".join(keep).strip("_") or "anon"
+    return seg[:64]
+
+
+def _run_id(w) -> str:
+    """A per-run id: `<user>_<timestamp>` so concurrent runs never collide."""
+    who = "app"
+    try:
+        me = w.current_user.me()
+        who = (me.user_name or me.display_name or "app").split("@")[0]
+    except Exception:
+        pass
+    return f"{_sanitize_segment(who)}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+
+def _write_notebook(w, path: str, scala_source: str) -> None:
+    """Import `scala_source` as a Scala SOURCE notebook at `path` (overwrite)."""
+    from databricks.sdk.service.workspace import ImportFormat, Language
+
+    parent = path.rsplit("/", 1)[0]
+    try:
+        w.workspace.mkdirs(parent)
+    except Exception:
+        pass
+    content = base64.b64encode(scala_source.encode("utf-8")).decode("ascii")
+    w.workspace.import_(
+        path=path,
+        format=ImportFormat.SOURCE,
+        language=Language.SCALA,
+        content=content,
+        overwrite=True,
+    )
+
+
+def _job_error_detail(w, run) -> str:
+    """Best-effort concise error for a failed Job run (task output + message)."""
+    msg = (getattr(getattr(run, "state", None), "state_message", None) or "").strip()
+    detail = ""
+    try:
+        tasks = getattr(run, "tasks", None) or []
+        if tasks:
+            out = w.jobs.get_run_output(run_id=tasks[0].run_id)
+            err = (getattr(out, "error", None) or "").strip()
+            trace = (getattr(out, "error_trace", None) or "").strip()
+            detail = err or "\n".join(trace.splitlines()[:4])
+    except Exception:
+        pass
+    text = (detail or msg or "unknown error").strip()
+    if len(text) > 600:
+        text = text[:600] + " …"
+    low = text.lower()
+    if "generatetemporaryvolumecredentials" in low or "temporary credentials" in low:
+        text += (
+            "\n\n→ Writing to the UC Volume was denied. The Job's run-as identity "
+            "needs **WRITE VOLUME** (and READ VOLUME) on the target Volume."
+        )
+    return text
+
+
+def run_via_job(
+    render_source: Callable[[str], str],
+    table_names: list[str],
+    *,
+    job_id: int | str,
+    volume_base: str,
+    notebook_dir: str,
+    progress: Callable[[str], None] | None = None,
+    timeout_min: int = 60,
+    user_token: str | None = None,
+) -> RunResult:
+    """Run the generated notebook via a pre-configured Databricks **Job**.
+
+    Designed for the deployed app: the app's **service principal** (with the Job
+    and UC Volume attached as *resources*) writes a per-run notebook, triggers the
+    Job with `run_now`, waits for it to finish, then downloads the CSV(s) the Job
+    wrote to the Volume. No on-behalf-of-user OAuth scopes are needed.
+
+    - `render_source(volume_dir)` → the full Scala notebook source, already wired to
+      write its CSV(s) under `volume_dir`. Called once the per-run dir is known.
+    - `job_id` — the Job to trigger (attached to the app as a resource).
+    - `volume_base` — Volume root, e.g. `/Volumes/usr/basegenerator/base_generator_volume/`.
+    - `notebook_dir` — workspace folder for the generated per-run notebooks.
+    """
+    from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
+
+    def _say(msg: str) -> None:
+        if progress:
+            progress(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    _say("Authenticating to Databricks…")
+    try:
+        w = _client(user_token)
+    except Exception as e:
+        return RunResult("ERROR", f"Could not authenticate to Databricks: {e}")
+
+    run_id = _run_id(w)
+    vol_dir = f"{volume_base.rstrip('/')}/{run_id}"
+    nb_path = f"{notebook_dir.rstrip('/')}/{run_id}"
+
+    _say(f"Rendering notebook (CSV → {vol_dir})…")
+    try:
+        source = render_source(vol_dir)
+    except Exception as e:
+        return RunResult("ERROR", f"Failed to render the notebook: {e}")
+
+    _say(f"Writing notebook to {nb_path}…")
+    try:
+        _write_notebook(w, nb_path, source)
+    except Exception as e:
+        return RunResult(
+            "ERROR",
+            f"Could not write the notebook to the workspace: {e}\n\n"
+            f"→ The running identity needs write access to `{notebook_dir}`.",
+        )
+
+    _say(f"Triggering Job {job_id}…")
+    try:
+        waiter = w.jobs.run_now(
+            job_id=int(job_id),
+            notebook_params={
+                "notebook_path": nb_path,
+                "timeout_seconds": str(int(timeout_min * 60)),
+            },
+        )
+        job_run_id = waiter.run_id
+    except Exception as e:
+        return RunResult("ERROR", f"Could not trigger the Job: {e}")
+
+    transient = _transient_exc_types()
+    deadline = time.monotonic() + timeout_min * 60
+    started = time.time()
+    page_url_said = False
+    last_life = ""
+    misses = 0
+    while True:
+        if time.monotonic() > deadline:
+            return RunResult(
+                "ERROR",
+                f"Job run {job_run_id} was still running after {timeout_min} min "
+                "(timeout). Increase the timeout or use tighter filters.",
+            )
+        try:
+            run = w.jobs.get_run(run_id=job_run_id)
+            misses = 0
+        except transient:
+            misses += 1
+            time.sleep(min(15.0, 3.0 * misses))
+            continue
+
+        if not page_url_said and getattr(run, "run_page_url", None):
+            _say(f"  run page: {run.run_page_url}")
+            page_url_said = True
+
+        state = getattr(run, "state", None)
+        life = getattr(state, "life_cycle_state", None)
+        if life and life != last_life:
+            last_life = life
+            _say(f"  {life.value if hasattr(life, 'value') else life} "
+                 f"(elapsed {_fmt_secs(time.time() - started)})")
+
+        if life in (
+            RunLifeCycleState.TERMINATED,
+            RunLifeCycleState.SKIPPED,
+            RunLifeCycleState.INTERNAL_ERROR,
+        ):
+            result_state = getattr(state, "result_state", None)
+            if result_state != RunResultState.SUCCESS:
+                return RunResult(
+                    "FAILED",
+                    f"Job run finished as {getattr(result_state, 'value', result_state)} "
+                    f"after {_fmt_secs(time.time() - started)}:\n"
+                    f"{_job_error_detail(w, run)}",
+                )
+            break
+        time.sleep(5.0)
+
+    _say(
+        f"Job finished in {_fmt_secs(time.time() - started)}. "
+        "Locating CSV(s) in the Volume…"
+    )
+    out = RunResult("SUCCESS")
+    for name in table_names:
+        t_loc = time.time()
+        found = _find_csv_in_dir(w, f"{vol_dir}/{name}")
+        dt = _fmt_secs(time.time() - t_loc)
+        if found:
+            path, size = found
+            out.csv_files[name] = path
+            out.csv_sizes[name] = size or 0
+            _say(f"  {name}: found ({_fmt_size(size)}) in {dt}")
+        else:
+            _say(f"  {name}: no CSV found under {vol_dir}/{name} ({dt})")
+    return out
