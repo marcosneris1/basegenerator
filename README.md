@@ -173,7 +173,7 @@ falls back with a clear message and you can use **Mode 2** for very large bases.
 
 **Setup (one-time):**
 
-- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py` (from this repo, ideally Git-sourced). Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume — it both runs the notebook and writes the CSV. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
+- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py`. **The task Source MUST be `Workspace`, not `Git`** — a Git-sourced task cannot run the app-generated notebook by workspace path (`dbutils.notebook.run` fails with *"Unable to access the notebook"*). So import `job_runner.py` into the workspace (e.g. `/Shared/base_generator/job_runner`) and point the task at that path with Source = Workspace. Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume — it both runs the notebook and writes the CSV. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
 - **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ VOLUME** on the Volume (so the app can download the finished CSV).
 - Optionally override the defaults with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME`.
 
