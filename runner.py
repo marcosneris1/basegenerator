@@ -606,6 +606,14 @@ def _job_error_detail(w, run) -> str:
             "\n\n→ Writing to the UC Volume was denied. The Job's run-as identity "
             "needs **WRITE VOLUME** (and READ VOLUME) on the target Volume."
         )
+    elif "workload failed" in low or "see run output" in low:
+        text += (
+            "\n\n→ The generated notebook itself failed. Open the **Job run page** "
+            "(link above) → the `job_runner` task → the nested notebook run "
+            "(`…/base_generator_runs/<run_id>`) to see the actual Scala error "
+            "(which cell + exception). Common causes: the `%run` helper isn't "
+            "accessible on the Job's cluster, or WRITE VOLUME is missing."
+        )
     return text
 
 
