@@ -147,64 +147,41 @@ Each template returns a fresh config copy from `default_config(country)` and ove
 ## Run on Databricks & export CSV (beta)
 
 Beyond downloading the `.scala`, the app can **execute** the generated notebook
-and hand you the full result as CSV. The **⚡ Run on Databricks & export CSV**
-section (below the generated code) offers two modes:
+and hand you the full result as CSV, via a **one-click "Run & build CSV"**
+button (below the generated code). The user only picks a timeout — the Job and
+Volume are fixed infrastructure they never see.
 
-### Mode 1 — Via Job (recommended for the deployed app)
+### How it works
 
-Triggers a **pre-configured Databricks Job** that builds the base and writes the
-CSV(s). It runs as the app's **service principal** using *resource grants*, so
-**no on-behalf-of-user OAuth scopes are needed** (this side-steps the
-`clusters`/`jobs` scope allow-list problem). Inputs:
+It triggers a **pre-configured Databricks Job** that builds the base and writes
+the CSV(s). It runs as the app's **service principal** using *resource grants*,
+so **no on-behalf-of-user OAuth scopes are needed** (this side-steps the
+`clusters`/`jobs` scope allow-list problem).
 
-- **Job ID** — the Job to trigger (attach it to the app as a resource). Default `109425859584826`.
-- **UC Volume base directory** — e.g. `/Volumes/usr/basegenerator/base_generator_volume/`; each run writes to a **per-run subfolder** (`<user>_<timestamp>`), so simultaneous runs never collide.
-- **Timeout** — how long to wait for the Job run.
-
-What happens on **Run via Job & build CSV**:
-
-1. The app renders the notebook (code + a CSV-export cell per table, wired to the per-run Volume subfolder) and passes it to the Job **inline** (base64) via `run_now`.
+1. The app renders the notebook (code + a CSV-export cell per table, wired to a per-run Volume subfolder `<user>_<timestamp>`, so simultaneous runs never collide) and passes it to the Job **inline** (base64) via `run_now`.
 2. The Job's task (`job_runner.py`) writes that notebook to the **run-as user's own home** and runs it via `dbutils.notebook.run`. Because the identity that *creates* the notebook is the one that *runs* it, there are no cross-identity workspace permissions to manage.
 3. Each table is written as a single header CSV (`coalesce(1)`) to the per-run Volume subfolder.
-4. The app polls the run to completion, then downloads each CSV and offers a browser **Download** button.
+4. The app polls the run to completion, then downloads each CSV and offers a browser **Download** button. If the page reconnects during the wait, a **"Check run & fetch CSV(s)"** recovery button fetches the result without re-running.
 
 The generated notebook must fit in the Job parameter limit (~10 KB); the app
-falls back with a clear message and you can use **Mode 2** for very large bases.
+falls back with a clear message for very large bases.
 
 **Setup (one-time):**
 
-- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py`. **The task Source MUST be `Workspace`, not `Git`** — a Git-sourced task cannot run the app-generated notebook by workspace path (`dbutils.notebook.run` fails with *"Unable to access the notebook"*). So import `job_runner.py` into the workspace (e.g. `/Shared/base_generator/job_runner`) and point the task at that path with Source = Workspace. Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume — it both runs the notebook and writes the CSV. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
+- **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py`. **The task Source MUST be `Workspace`, not `Git`** — a Git-sourced task cannot run the app-generated notebook by workspace path (`dbutils.notebook.run` fails with *"Unable to access the notebook"*). So import `job_runner.py` into the workspace (e.g. `/Shared/base_generator/job_runner`) and point the task at that path with Source = Workspace. The Job's **cluster must have the same environment** as the interactive cluster the base normally runs on (team libraries/JARs, init scripts, instance profile for data access) — otherwise the generated notebook fails in seconds. Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
 - **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ VOLUME** on the Volume (so the app can download the finished CSV).
-- Optionally override the defaults with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME`.
-
-### Mode 2 — Interactive (existing cluster)
-
-Runs the generated Scala **cell-by-cell** on a running cluster via execution
-contexts (the same mechanism a notebook cell uses). Inputs: **cluster ID/name**
-+ **UC Volume output directory**. Because it runs interactively rather than as a
-Jobs run, it works on **interactive-only clusters** (jobs workload disabled); the
-cluster must be **running**. Steps:
-
-1. The generated notebook is split into cells; any `%run` helper notebook is **inlined** (its source is fetched and its cells run first, so `datasets()`, `.save()`, `maximo`, … are defined).
-2. An execution context is opened on the cluster and each cell runs in order (state persists across cells).
-3. Each output table is written as a single header CSV (`coalesce(1)`) to the Volume, then downloaded.
-
-When deployed, this mode runs **on behalf of the logged-in user** (forwarded
-`x-forwarded-access-token`) and therefore needs the workspace's *OAuth scopes for
-apps* allow-list to include compute/command-execution/files scopes — which is why
-**Mode 1 (Via Job) is preferred** where those scopes aren't available.
+- Point the app at the right Job/Volume with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME` (defaults: `109425859584826` and `/Volumes/usr/basegenerator/base_generator_volume/`).
 
 ### How it works in code
 
 - `lib.render_scala_with_csv_export(cfg, volume_dir)` / `lib.render_csv_export_cells(...)` — pure renderers that append the export cells.
-- `job_runner.py` — the generic Job task notebook that runs the app-generated notebook by path.
-- `runner.py` — UI-agnostic execution layer with `run_via_job(...)` (Mode 1) and `run_interactive(...)` (Mode 2). The Databricks SDK is imported lazily, so the rest of the app still works without it.
+- `job_runner.py` — the generic Job task notebook: imports the app-generated notebook inline and runs it as the run-as user.
+- `runner.py` — UI-agnostic execution layer: `run_via_job(...)` triggers the Job and `fetch_job_result(...)` resumes/collects the CSV. (`run_interactive(...)` for existing clusters is still present but no longer wired into the UI.) The Databricks SDK is imported lazily, so the rest of the app still works without it.
 
 **Auth & permissions.**
 
 - **Local dev:** the SDK uses your CLI profile (`Marcos Neris`, override with `DATABRICKS_CONFIG_PROFILE`). The profile is pinned to avoid the slow default-auth provider probing.
-- **Deployed app, Mode 1 (Via Job):** runs as the **service principal** via resource grants — no user consent/scopes needed.
-- **Deployed app, Mode 2 (Interactive):** runs **on behalf of the logged-in user**; requires enabling User Authorization + scopes (admin, one-time) and a full stop/start of the app.
+- **Deployed app:** runs as the **service principal** via resource grants — no user consent/scopes needed.
 
 **⚠️ PII / compliance.** This runs against production data and exports a full
 base (personal data — CPF/CNPJ, tags) to CSV. Only run authorized, reviewed

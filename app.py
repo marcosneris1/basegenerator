@@ -772,61 +772,39 @@ else:
         "BASE_GENERATOR_VOLUME", "/Volumes/usr/basegenerator/base_generator_volume/"
     )
 
-    mode = st.radio(
-        "Execution mode",
-        ["Via Job (recommended)", "Interactive (existing cluster)"],
-        index=0,
-        horizontal=True,
-        help="**Via Job** triggers a pre-configured Databricks Job through the "
-        "app's service principal (Job + Volume attached as resources) — no cluster "
-        "field and no user OAuth scopes needed; best for the deployed app. "
-        "**Interactive** runs the notebook cell-by-cell on a running cluster you "
-        "pick (on-behalf-of-you when deployed).",
-    )
-
     _tables_line = (
         "Will produce: "
         + ", ".join(f"`{t}`" for t in tables)
         + (" — one CSV each." if len(tables) > 1 else " — one CSV.")
     )
 
-    if mode.startswith("Via Job"):
+    # Job and Volume are fixed infrastructure — the user never sees or edits them
+    # (override via BASE_GENERATOR_JOB_ID / BASE_GENERATOR_VOLUME env vars).
+    job_id = _DEFAULT_JOB_ID
+    volume_base = _DEFAULT_VOLUME
+
+    if True:
         st.caption(
-            "Triggers a pre-configured Databricks **Job**. The app hands it the "
-            "generated notebook inline; the Job builds the base and writes the "
-            "CSV(s) to the Volume, then the app downloads them. Concurrent runs "
-            "are isolated in per-run subfolders."
+            "Builds the base on Databricks and gives you the CSV(s) to download. "
+            "Just click below — it can take a few minutes."
         )
         with st.form("job_form"):
-            job_id = st.text_input(
-                "Job ID",
-                value=st.session_state.get("run_job_id", _DEFAULT_JOB_ID),
-                help="The Databricks Job to trigger (attach it to the app as a "
-                "resource so the service principal can run it).",
-            )
-            volume_base = st.text_input(
-                "UC Volume base directory",
-                value=st.session_state.get("run_volume_base", _DEFAULT_VOLUME),
-                help="Root Volume path. Each run writes its CSV(s) to a per-run "
-                "subfolder here — so simultaneous runs never overwrite each other.",
-            )
             timeout_min_job = st.number_input(
-                "Timeout (minutes)", min_value=5, max_value=240, value=60, step=5
+                "Timeout (minutes)", min_value=5, max_value=240, value=60, step=5,
+                help="How long to wait for the run before giving up.",
             )
             job_submitted = st.form_submit_button(
-                "▶️ Run via Job & build CSV", type="primary", use_container_width=True
+                "▶️ Run & build CSV", type="primary", use_container_width=True
             )
         st.caption(_tables_line)
 
         if job_submitted:
-            if not job_id.strip():
-                st.error("Enter a Job ID.")
-            elif not volume_base.strip():
-                st.error("Enter a UC Volume base directory.")
+            if not job_id or not volume_base:
+                st.error(
+                    "The app isn't configured with a Job/Volume. Set "
+                    "BASE_GENERATOR_JOB_ID and BASE_GENERATOR_VOLUME (or defaults)."
+                )
             else:
-                st.session_state["run_job_id"] = job_id.strip()
-                st.session_state["run_volume_base"] = volume_base.strip()
-
                 runner = _require_runner()
 
                 def _render(vol_dir):
@@ -848,14 +826,14 @@ else:
 
                 _wall0 = _time.time()
                 with st.status(
-                    f"Running Job {job_id.strip()}…", expanded=True
+                    "Building your base on Databricks…", expanded=True
                 ) as status:
                     status.write(f"[{_time.strftime('%H:%M:%S')}] starting run…")
                     result = runner.run_via_job(
                         _render,
                         tables,
-                        job_id=job_id.strip(),
-                        volume_base=volume_base.strip(),
+                        job_id=job_id,
+                        volume_base=volume_base,
                         progress=status.write,
                         timeout_min=int(timeout_min_job),
                         # Job + Volume are granted to the app's service principal
@@ -879,7 +857,7 @@ else:
                     "message": result.message,
                     "csv_paths": dict(result.csv_files),
                     "csv_sizes": dict(result.csv_sizes),
-                    "volume_dir": volume_base.strip(),
+                    "volume_dir": volume_base,
                     "use_obo": False,  # CSV lives in the SP-readable Volume
                 }
                 st.session_state["csv_bytes"] = {}
@@ -928,111 +906,6 @@ else:
                 if result.ok and result.csv_files:
                     st.session_state.pop("job_ctx", None)
                 st.rerun()
-
-    else:
-        st.caption(
-            "Runs **interactively** (execution context) on the cluster — so "
-            "interactive-only clusters work. The cluster must be **running**."
-        )
-
-        with st.form("run_form"):
-            cluster_id = st.text_input(
-                "Existing cluster (ID or name)",
-                value=st.session_state.get("run_cluster_id", ""),
-                placeholder="0123-456789-abcdefgh  or  my-cluster-name",
-                help="A running cluster you can execute on. Accepts the cluster ID "
-                "or its display name. Use the expander below to list clusters.",
-            )
-            volume_dir = st.text_input(
-                "UC Volume output directory",
-                value=st.session_state.get("run_volume_dir", ""),
-                placeholder="/Volumes/<catalog>/<schema>/<volume>/base_generator",
-                help="A Unity Catalog Volume path the app's identity can write to. "
-                "One subfolder per table is created here.",
-            )
-            submitted = st.form_submit_button(
-                "▶️ Run & build CSV", type="primary", use_container_width=True
-            )
-
-        st.caption(_tables_line)
-
-        with st.expander("🔎 List clusters I can use"):
-            if st.button("Load clusters"):
-                runner = _require_runner()
-                try:
-                    with st.spinner("Fetching clusters…"):
-                        clusters = runner.list_clusters(user_token=_user_token())
-                    if clusters:
-                        st.dataframe(
-                            [
-                                {"name": n, "id": cid, "state": state}
-                                for n, cid, state in clusters
-                            ],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.caption(
-                            "Use a cluster in **state = RUNNING** — copy its **id** "
-                            "(or name) into the field above."
-                        )
-                    else:
-                        st.info("No clusters visible to this identity.")
-                except Exception as e:
-                    st.error(f"Couldn't list clusters: {e}")
-
-        if submitted:
-            if not cluster_id.strip():
-                st.error("Enter a cluster ID or name.")
-            elif not volume_dir.strip():
-                st.error("Enter a UC Volume output directory.")
-            else:
-                st.session_state["run_cluster_id"] = cluster_id.strip()
-                st.session_state["run_volume_dir"] = volume_dir.strip()
-
-                runner = _require_runner()
-                source = render_scala_with_csv_export(cfg, volume_dir.strip())
-
-                import time as _time
-
-                _wall0 = _time.time()
-                with st.status(
-                    f"Running on {cluster_id.strip()}…", expanded=True
-                ) as status:
-                    status.write(f"[{_time.strftime('%H:%M:%S')}] starting run…")
-                    result = runner.run_interactive(
-                        source,
-                        tables,
-                        cluster_id=cluster_id.strip(),
-                        volume_dir=volume_dir.strip(),
-                        progress=status.write,
-                        user_token=_user_token(),
-                    )
-                    _wall = runner._fmt_secs(_time.time() - _wall0)
-                    # Stamp the clock the instant control returns. If this time is
-                    # far ahead of the last "cleanup done" line, the OS paused the
-                    # process (system sleep / App Nap) during the idle return path.
-                    status.write(
-                        f"[{_time.strftime('%H:%M:%S')}] back in app "
-                        f"(⏱️ total wall-clock: {_wall})"
-                    )
-                    status.update(
-                        label=f"Run finished in {_wall}" if result.ok else "Run failed",
-                        state="complete" if result.ok else "error",
-                        expanded=not result.ok,
-                    )
-
-                # Persist the outcome so the download buttons survive the reruns
-                # that Streamlit triggers on each download click (otherwise only the
-                # first CSV — the one clicked — would ever be downloadable).
-                st.session_state["last_run"] = {
-                    "ok": result.ok,
-                    "message": result.message,
-                    "csv_paths": dict(result.csv_files),
-                    "csv_sizes": dict(result.csv_sizes),
-                    "volume_dir": volume_dir.strip(),
-                    "use_obo": True,  # read the CSV back as the same user identity
-                }
-                st.session_state["csv_bytes"] = {}  # fresh download cache per run
 
     # --- Result (rendered every rerun from session state) --------------------
     last = st.session_state.get("last_run")
