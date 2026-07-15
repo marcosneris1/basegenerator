@@ -97,14 +97,16 @@ except Exception as e:
 
 # Executa o notebook gerado. Ele constrói a base (com seus `%run` nativos) e grava
 # o(s) CSV(s) no Volume indicado dentro do próprio notebook.
+#
+# IMPORTANTE: só apagamos o notebook em caso de SUCESSO. Se o run falhar, ele é
+# mantido em `nb_path` para troubleshooting (abra-o no workspace e rode célula a
+# célula para ver a exceção real). Runs bem-sucedidos limpam sozinhos.
+result = dbutils.notebook.run(nb_path, timeout_seconds)
+
 try:
-    result = dbutils.notebook.run(nb_path, timeout_seconds)
-finally:
-    # Limpa o notebook temporário (best-effort).
-    try:
-        w.workspace.delete(nb_path)
-    except Exception as _e:
-        print(f"(cleanup) could not delete {nb_path}: {_e}")
+    w.workspace.delete(nb_path)
+except Exception as _e:
+    print(f"(cleanup) could not delete {nb_path}: {_e}")
 
 # COMMAND ----------
 
