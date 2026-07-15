@@ -626,6 +626,7 @@ def run_via_job(
     progress: Callable[[str], None] | None = None,
     timeout_min: int = 60,
     user_token: str | None = None,
+    on_started: Callable[[dict], None] | None = None,
 ) -> RunResult:
     """Run the generated notebook via a pre-configured Databricks **Job**.
 
@@ -692,6 +693,26 @@ def run_via_job(
     except Exception as e:
         return RunResult("ERROR", f"Could not trigger the Job: {e}")
 
+    # Surface the run context immediately so the caller can persist it *before*
+    # the long wait. If the UI reconnects/reruns and interrupts this call, the
+    # caller can resume with `fetch_job_result(...)` instead of re-running.
+    if on_started:
+        try:
+            on_started(
+                {"job_run_id": job_run_id, "run_id": run_id, "vol_dir": vol_dir}
+            )
+        except Exception:
+            pass
+
+    return _poll_and_collect(w, job_run_id, vol_dir, table_names, _say, timeout_min)
+
+
+def _poll_and_collect(
+    w, job_run_id, vol_dir: str, table_names: list[str], say, timeout_min: int
+) -> RunResult:
+    """Poll a Job run to completion, then locate the CSV(s) in the Volume."""
+    from databricks.sdk.service.jobs import RunLifeCycleState, RunResultState
+
     transient = _transient_exc_types()
     deadline = time.monotonic() + timeout_min * 60
     started = time.time()
@@ -714,15 +735,15 @@ def run_via_job(
             continue
 
         if not page_url_said and getattr(run, "run_page_url", None):
-            _say(f"  run page: {run.run_page_url}")
+            say(f"  run page: {run.run_page_url}")
             page_url_said = True
 
         state = getattr(run, "state", None)
         life = getattr(state, "life_cycle_state", None)
         if life and life != last_life:
             last_life = life
-            _say(f"  {life.value if hasattr(life, 'value') else life} "
-                 f"(elapsed {_fmt_secs(time.time() - started)})")
+            say(f"  {life.value if hasattr(life, 'value') else life} "
+                f"(elapsed {_fmt_secs(time.time() - started)})")
 
         if life in (
             RunLifeCycleState.TERMINATED,
@@ -740,7 +761,7 @@ def run_via_job(
             break
         time.sleep(5.0)
 
-    _say(
+    say(
         f"Job finished in {_fmt_secs(time.time() - started)}. "
         "Locating CSV(s) in the Volume…"
     )
@@ -753,7 +774,36 @@ def run_via_job(
             path, size = found
             out.csv_files[name] = path
             out.csv_sizes[name] = size or 0
-            _say(f"  {name}: found ({_fmt_size(size)}) in {dt}")
+            say(f"  {name}: found ({_fmt_size(size)}) in {dt}")
         else:
-            _say(f"  {name}: no CSV found under {vol_dir}/{name} ({dt})")
+            say(f"  {name}: no CSV found under {vol_dir}/{name} ({dt})")
     return out
+
+
+def fetch_job_result(
+    *,
+    job_run_id: int,
+    vol_dir: str,
+    table_names: list[str],
+    progress: Callable[[str], None] | None = None,
+    timeout_min: int = 60,
+    user_token: str | None = None,
+) -> RunResult:
+    """Resume a previously-triggered Job run: wait (if needed) and fetch CSV(s).
+
+    Used to recover when the UI was interrupted during `run_via_job` (e.g. a
+    browser reconnect). Given the `job_run_id` and the per-run Volume dir stored
+    at trigger time, it polls the run and locates the CSV(s) — without launching
+    a new run.
+    """
+    def _say(msg: str) -> None:
+        if progress:
+            progress(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    try:
+        w = _client(user_token)
+    except Exception as e:
+        return RunResult("ERROR", f"Could not authenticate to Databricks: {e}")
+
+    _say(f"Checking Job run {job_run_id}…")
+    return _poll_and_collect(w, job_run_id, vol_dir, table_names, _say, timeout_min)

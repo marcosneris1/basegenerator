@@ -832,6 +832,18 @@ else:
                 def _render(vol_dir):
                     return render_scala_with_csv_export(cfg, vol_dir)
 
+                def _on_started(ctx):
+                    # Persist the run context the instant the Job is triggered, so a
+                    # browser reconnect mid-wait doesn't lose the ability to fetch
+                    # the CSV afterwards (recovery button below).
+                    st.session_state["job_ctx"] = {
+                        "job_run_id": ctx["job_run_id"],
+                        "vol_dir": ctx["vol_dir"],
+                        "run_id": ctx["run_id"],
+                        "tables": list(tables),
+                        "timeout_min": int(timeout_min_job),
+                    }
+
                 import time as _time
 
                 _wall0 = _time.time()
@@ -849,6 +861,7 @@ else:
                         # Job + Volume are granted to the app's service principal
                         # via resources, so run as the SP (never the user token).
                         user_token=None,
+                        on_started=_on_started,
                     )
                     _wall = runner._fmt_secs(_time.time() - _wall0)
                     status.write(
@@ -870,6 +883,51 @@ else:
                     "use_obo": False,  # CSV lives in the SP-readable Volume
                 }
                 st.session_state["csv_bytes"] = {}
+                # Clear the recovery context once we have a successful result.
+                if result.ok and result.csv_files:
+                    st.session_state.pop("job_ctx", None)
+
+        # --- Recovery: fetch the CSV of a triggered run without re-running -----
+        ctx = st.session_state.get("job_ctx")
+        last = st.session_state.get("last_run")
+        _need_recovery = ctx and not (
+            last and last.get("ok") and last.get("csv_paths")
+        )
+        if _need_recovery:
+            st.info(
+                "A Job run was triggered "
+                f"(run `{ctx['job_run_id']}`). If the page reconnected during the "
+                "wait, the result may not have loaded. Fetch it here without "
+                "re-running the Job."
+            )
+            if st.button("🔄 Check run & fetch CSV(s)"):
+                runner = _require_runner()
+                with st.status("Checking the Job run…", expanded=True) as rstatus:
+                    result = runner.fetch_job_result(
+                        job_run_id=ctx["job_run_id"],
+                        vol_dir=ctx["vol_dir"],
+                        table_names=ctx["tables"],
+                        progress=rstatus.write,
+                        timeout_min=int(ctx.get("timeout_min", 60)),
+                        user_token=None,
+                    )
+                    rstatus.update(
+                        label="Done" if result.ok else "Run failed",
+                        state="complete" if result.ok else "error",
+                        expanded=not result.ok,
+                    )
+                st.session_state["last_run"] = {
+                    "ok": result.ok,
+                    "message": result.message,
+                    "csv_paths": dict(result.csv_files),
+                    "csv_sizes": dict(result.csv_sizes),
+                    "volume_dir": ctx["vol_dir"],
+                    "use_obo": False,
+                }
+                st.session_state["csv_bytes"] = {}
+                if result.ok and result.csv_files:
+                    st.session_state.pop("job_ctx", None)
+                st.rerun()
 
     else:
         st.caption(
