@@ -158,8 +158,8 @@ the CSV(s). It runs as the app's **service principal** using *resource grants*,
 so **no on-behalf-of-user OAuth scopes are needed** (this side-steps the
 `clusters`/`jobs` scope allow-list problem).
 
-1. The app renders the notebook (code + a CSV-export cell per table, wired to a per-run Volume subfolder `<user>_<timestamp>`, so simultaneous runs never collide) and passes it to the Job **inline** (base64) via `run_now`.
-2. The Job's task (`job_runner.py`) writes that notebook to the **run-as user's own home** and runs it via `dbutils.notebook.run`. Because the identity that *creates* the notebook is the one that *runs* it, there are no cross-identity workspace permissions to manage.
+1. The app renders the notebook (code + a CSV-export cell per table, wired to a per-run Volume subfolder `<logged-in-user>_<timestamp>_<random>`, so each user's runs are isolated and never collide) and passes it to the Job **inline** (base64) via `run_now`. The user identity comes from the `X-Forwarded-Email` header the Databricks App forwards.
+2. The Job's task (`job_runner.py`) writes that notebook to `/Shared/base_generator/runs/<run_id>` (configurable via `BASE_GENERATOR_NOTEBOOK_DIR`; falls back to the run-as user's home if it lacks write there) and runs it via `dbutils.notebook.run`. Because the run-as identity both *creates* and *runs* the notebook, there are no cross-identity workspace permissions to manage.
 3. Each table is written as a single header CSV (`coalesce(1)`) to the per-run Volume subfolder.
 4. The app polls the run to completion, then downloads each CSV and offers a browser **Download** button. If the page reconnects during the wait, a **"Check run & fetch CSV(s)"** recovery button fetches the result without re-running.
 
@@ -170,7 +170,7 @@ falls back with a clear message for very large bases.
 
 - **Job:** create a Databricks Job whose single **notebook task** points at `job_runner.py`. **The task Source MUST be `Workspace`, not `Git`** — a Git-sourced task cannot run the app-generated notebook by workspace path (`dbutils.notebook.run` fails with *"Unable to access the notebook"*). So import `job_runner.py` into the workspace (e.g. `/Shared/base_generator/job_runner`) and point the task at that path with Source = Workspace. The Job's **cluster must have the same environment** as the interactive cluster the base normally runs on (team libraries/JARs, init scripts, instance profile for data access) — otherwise the generated notebook fails in seconds. Give the Job's **run-as identity** access to the source datasets and **WRITE VOLUME** (and READ) on the Volume. Set `max_concurrent_runs` to 10–20 so multiple users can run at once. (`databricks-sdk` ships with the Databricks Runtime, which `job_runner.py` uses to import the notebook.)
 - **App resources:** in the app settings, attach the **Job** and the **UC Volume** as *resources* and grant the service principal **CAN MANAGE RUN** on the Job and **READ VOLUME** on the Volume (so the app can download the finished CSV).
-- Point the app at the right Job/Volume with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME` (defaults: `109425859584826` and `/Volumes/usr/basegenerator/base_generator_volume/`).
+- Point the app at the right Job/Volume with env vars `BASE_GENERATOR_JOB_ID`, `BASE_GENERATOR_VOLUME` (defaults: `109425859584826` and `/Volumes/usr/basegenerator/base_generator_volume/`), and optionally `BASE_GENERATOR_NOTEBOOK_DIR` (default `/Shared/base_generator/runs`). If you use `/Shared/base_generator/runs`, make sure the Job's run-as identity can **write** to `/Shared/base_generator` (usually open by default; otherwise a one-time grant) — else it transparently falls back to the run-as user's home.
 
 ### How it works in code
 

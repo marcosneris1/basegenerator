@@ -747,6 +747,21 @@ else:
         except Exception:
             return None
 
+    def _user_email():
+        """The logged-in user, from headers the Databricks App forwards.
+
+        `X-Forwarded-Email` / `X-Forwarded-Preferred-Username` are sent even
+        without on-behalf-of-user auth, so each run can be named after the user.
+        Returns None locally.
+        """
+        try:
+            h = st.context.headers
+            return h.get("x-forwarded-email") or h.get(
+                "x-forwarded-preferred-username"
+            )
+        except Exception:
+            return None
+
     def _require_runner():
         """Import runner and verify the SDK is present, or stop with a message."""
         try:
@@ -770,6 +785,9 @@ else:
     _DEFAULT_JOB_ID = _os.getenv("BASE_GENERATOR_JOB_ID", "109425859584826")
     _DEFAULT_VOLUME = _os.getenv(
         "BASE_GENERATOR_VOLUME", "/Volumes/usr/basegenerator/base_generator_volume/"
+    )
+    _DEFAULT_NB_DIR = _os.getenv(
+        "BASE_GENERATOR_NOTEBOOK_DIR", "/Shared/base_generator/runs"
     )
 
     _tables_line = (
@@ -840,6 +858,10 @@ else:
                         # via resources, so run as the SP (never the user token).
                         user_token=None,
                         on_started=_on_started,
+                        # Name each run after the logged-in user + a random suffix
+                        # so users' runs are isolated and never collide.
+                        run_id_prefix=_user_email(),
+                        notebook_dir=_DEFAULT_NB_DIR,
                     )
                     _wall = runner._fmt_secs(_time.time() - _wall0)
                     status.write(

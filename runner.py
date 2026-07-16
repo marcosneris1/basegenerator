@@ -573,15 +573,29 @@ def _sanitize_segment(s: str) -> str:
     return seg[:64]
 
 
-def _run_id(w) -> str:
-    """A per-run id: `<user>_<timestamp>` so concurrent runs never collide."""
-    who = "app"
-    try:
-        me = w.current_user.me()
-        who = (me.user_name or me.display_name or "app").split("@")[0]
-    except Exception:
-        pass
-    return f"{_sanitize_segment(who)}_{time.strftime('%Y%m%d_%H%M%S')}"
+def _run_id(w, prefix: str | None = None) -> str:
+    """A per-run id: `<who>_<timestamp>_<rand>` so concurrent runs never collide.
+
+    `prefix` is the logged-in user's identity (forwarded by the app) so each
+    user's runs are named after them. When absent, fall back to the calling
+    identity (the service principal). A short random suffix guarantees uniqueness
+    even when two runs start in the same second.
+    """
+    import secrets
+
+    who = (prefix or "").strip()
+    if not who:
+        who = "app"
+        try:
+            me = w.current_user.me()
+            who = (me.user_name or me.display_name or "app")
+        except Exception:
+            pass
+    who = who.split("@")[0]
+    return (
+        f"{_sanitize_segment(who)}_{time.strftime('%Y%m%d_%H%M%S')}"
+        f"_{secrets.token_hex(3)}"
+    )
 
 
 def _job_error_detail(w, run) -> str:
@@ -627,6 +641,8 @@ def run_via_job(
     timeout_min: int = 60,
     user_token: str | None = None,
     on_started: Callable[[dict], None] | None = None,
+    run_id_prefix: str | None = None,
+    notebook_dir: str | None = None,
 ) -> RunResult:
     """Run the generated notebook via a pre-configured Databricks **Job**.
 
@@ -656,7 +672,7 @@ def run_via_job(
     except Exception as e:
         return RunResult("ERROR", f"Could not authenticate to Databricks: {e}")
 
-    run_id = _run_id(w)
+    run_id = _run_id(w, run_id_prefix)
     vol_dir = f"{volume_base.rstrip('/')}/{run_id}"
 
     _say(f"Rendering notebook (CSV → {vol_dir})…")
@@ -666,8 +682,8 @@ def run_via_job(
         return RunResult("ERROR", f"Failed to render the notebook: {e}")
 
     # Pass the generated notebook to the Job *inline* (base64), not as a path.
-    # The Job (`job_runner.py`) writes it to the run-as user's own home and runs
-    # it, so the identity that creates the notebook is the one that runs it — no
+    # The Job (`job_runner.py`) writes it (as the run-as identity) and runs it, so
+    # the identity that creates the notebook is the one that runs it — no
     # cross-identity workspace ACLs to manage.
     import json
 
@@ -677,6 +693,8 @@ def run_via_job(
         "run_id": run_id,
         "timeout_seconds": str(int(timeout_min * 60)),
     }
+    if notebook_dir:
+        params["notebook_dir"] = notebook_dir
     # Databricks caps the notebook_params JSON at ~10,000 bytes.
     if len(json.dumps(params).encode("utf-8")) > 9500:
         return RunResult(
