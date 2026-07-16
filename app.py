@@ -727,8 +727,7 @@ else:
 
     st.warning(
         "This **executes** the generated notebook on a cluster against production "
-        "data and writes the full result as CSV. The output contains personal data "
-        "(PII) — only run authorized, reviewed bases.",
+        "data and writes the full result as CSV.",
         icon="⚠️",
     )
 
