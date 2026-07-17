@@ -108,24 +108,23 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, then walk thro
    - `days_late` range (min/max)
    - Customer type (person / company)
    - Open collections only → `.where($"collection__end".isNull)` (MX default: on)
+   - **Cured collections only** → `.where($"collection__cured" === 1)`. Both BR and MX read the native `collection__cured` 0/1 column.
+   - **Roxinho only** (BR-only) — joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then keeps only `roxinho === 1`.
 2. **🏷️ Derived flags** — 1/0 product columns:
    - `is_cc` (credit card) and `is_ll` (lending). **If only one is ticked, the base is auto-filtered to that product.**
-   - `cured` — 1 if the collection is cured. Both BR and MX read the native `collection__cured` column.
 3. **🎯 Segmentation**:
    - **lateness** — `short` / `long` with a configurable day cutoff.
    - **segment** — `cc_only` / `ll_only` / `multi_debt`; requires *both* product flags.
    - **Income segments** (BR-only) — joins `dataset/br-segments-v5` to attach `income_segments` (`mass_market` / `super_core` / `high_income`). Tick a strict subset to filter; tick all three to just attach the column.
    - **Split mode** — *Keep all segments*, *Filter to one segment*, or *Multi-save* (see [§7](#7-multi-save)).
 4. **🔒 Compliance** — the canonical `forbidden_tags` filter, country-specific (see [§5](#5-country-handling-br-vs-mx)).
-5. **🧩 Enrichment** (BR-only):
-   - **Roxinho only flag** — joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then keeps only `roxinho === 1`.
-6. **💾 Output**:
+5. **💾 Output**:
    - **Columns to keep** — a multiselect listing *only currently-available columns* (prevents typos / "column not found" at runtime).
    - **Base sample size** — row cap via `.limit(n)`. In multi-save mode this becomes one input per resulting table.
 
 ### ⚙️ Advanced settings (expander)
 
-- **Aggregation** — `groupBy("customer__id")` with `max(...)` on the flags, `days_late`, and `cured`. On MX the key is `("customer__id", "prototype")` and the helper is `maximo(...)` instead of `max(...).as(...)`.
+- **Aggregation** — `groupBy("customer__id")` with `max(...)` on the flags and `days_late`. On MX the key is `("customer__id", "prototype")` and the helper is `maximo(...)` instead of `max(...).as(...)`.
 
 ### Validation panel
 
@@ -150,7 +149,7 @@ Switching country in the sidebar **resets the checklist** to that country's defa
 | Source | Derived from flags: `collectionsCc` / `collectionsLl` v2, union when both | Derived from flags: `collectionsCc` / `collectionsLl` daily, union when both |
 | Flag columns | `is_cc` / `is_ll`, tagged at source by which dataset a row came from | `is_cc` / `is_ll`, tagged at source by which dataset a row came from |
 | `days_late` | Native `product__days_late` (v2 rename) | Native `product__days_late` (v2 rename) |
-| `cured` | Native `collection__cured` (renamed) | Native `collection__cured` (renamed) |
+| Cured filter | `.where($"collection__cured" === 1)` (native column) | `.where($"collection__cured" === 1)` (native column) |
 | Open-collections filter | Off by default | **On by default** (MX historically scoped to open collections) |
 | `prototype` | Enriched via inner join from `contract-customers/customers` | Native on the new datasets; also a groupBy key |
 | GroupBy | `groupBy("customer__id")`, `max(c).as(c)` | `groupBy("customer__id", "prototype")`, `maximo(c)` |
@@ -209,9 +208,9 @@ The entire app state is a **flat dict** stored at `st.session_state.config`, pro
 | `filter_days_late_range` / `days_late_low` / `days_late_high` | bool / int / int | Min/max overdue-days filter. |
 | `filter_customer_type` / `customer_type` | bool / `"person" \| "company"` | Customer-type filter. |
 | `filter_collection_end_null` | bool | Keep only open collections. |
-| `flag_is_cc` / `flag_is_ll` | bool | Product flags. One alone also filters the base to that product. |
-| `flag_cured` | bool | `cured` 0/1 column. |
+| `filter_cured_only` | bool | Keep only cured collections (`where collection__cured === 1`). |
 | `flag_roxinho` | bool | BR-only Roxinho-only filter (join + `where roxinho === 1`). |
+| `flag_is_cc` / `flag_is_ll` | bool | Product flags. One alone also filters the base to that product. |
 | `segment_income` / `income_segment_values` | bool / list[str] | BR-only income segments; subset of `["mass_market", "super_core", "high_income"]`. Strict subset → filter; all three → attach only. |
 | `groupby_customer_id` | bool | Aggregation to one row per customer (per customer+prototype on MX). |
 | `segment_lateness` / `lateness_cutoff` | bool / int | `lateness` short/long column with cutoff in days. |
@@ -257,7 +256,6 @@ app.py (Streamlit)                       lib.py (pure logic)
 │ live preview + download  │             │   ├ _render_forbidden_tags…  │
 └──────────────────────────┘             │   ├ _render_base_block       │
                                          │   │   ├ _render_filters      │
-                                         │   │   ├ _render_flags        │
                                          │   │   ├ _render_groupby      │
                                          │   │   └ _render_segments     │
                                          │   └ _render_save_block       │
@@ -289,7 +287,7 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 3. **Forbidden tags filter** (if enabled) — builds `val forbiddenTagsCustomers`:
    - BR: explode `customer__tags`, `containsAny` exact match, `groupBy` + `maximo`, keep flagged.
    - MX: lowercase tags, `EXISTS(..., instr(...) > 0)` substring match, distinct `customer__id`s.
-4. **Base** — `val base` built from the product dataset(s): a single tagged dataset, or `unionByName(collectionsCc[is_cc=1,is_ll=0], collectionsLl[is_cc=0,is_ll=1])` when both flags (or neither) are set. Then the chain: filters → `cured` flag → groupBy/agg → segment columns. Product flags are tagged at the source, so there's no separate flag-derivation or single-flag exclusivity step.
+4. **Base** — `val base` built from the product dataset(s): a single tagged dataset, or `unionByName(collectionsCc[is_cc=1,is_ll=0], collectionsLl[is_cc=0,is_ll=1])` when both flags (or neither) are set. Then the chain: filters (including the cured-only `where`) → groupBy/agg → segment columns. Product flags are tagged at the source, so there's no separate flag-derivation or single-flag exclusivity step.
 5. **Save** (×1 or ×N) — per save: `base` → `leftanti` join on forbidden tags → enrichment joins → roxinho / income filters → lateness/segment `where` overrides → `.select(...)` → `.limit(n)` → `.save("name")`, followed by a `table("name").d` display cell.
 
 ---
@@ -316,8 +314,8 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 - Person-type base without `forbidden_tags` (usually required for outbound/research; eligibility tests typically skip it).
 - BR `groupBy` with nothing to aggregate (`.agg()` will be skipped).
 - Sample size > 1,000,000 (globally or per table).
-- `cured` flag combined with the open-collections filter (the filter excludes everyone who is cured).
-- BR-only enrichments (Roxinho, income segments) enabled while country is MX.
+- `cured collections only` combined with the open-collections filter (cured collections have usually ended, so the base is likely empty).
+- BR-only features (Roxinho, income segments) enabled while country is MX.
 - Multi-save producing only one table (equivalent to a single filtered save).
 - Selected columns not in `available_select_columns(cfg)` (likely typos).
 
@@ -356,7 +354,7 @@ Write a `_my_template()` factory that starts from `default_config(country)`, `up
 
 ### Adding a new country
 
-Add entries to `COLUMN_NAMES`, `KNOWN_DATASETS`, a forbidden-tags list + `forbidden_tags_for` branch, a branch in `default_config`, and country-aware branches in the renderer functions that differ (`_render_flags`, `_render_groupby`, `_render_forbidden_tags_block`, header).
+Add entries to `COLUMN_NAMES`, `KNOWN_DATASETS`, a forbidden-tags list + `forbidden_tags_for` branch, a branch in `default_config`, and country-aware branches in the renderer functions that differ (`_render_filters`, `_render_groupby`, `_render_forbidden_tags_block`, header).
 
 ---
 

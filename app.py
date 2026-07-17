@@ -55,22 +55,109 @@ if "config" not in st.session_state:
     st.session_state.config = default_config("BR")
 
 
-# IMPORTANT: the checklist widgets below intentionally do NOT pass a Streamlit
-# `key`. The single source of truth is `st.session_state.config` (aka `cfg`),
-# and every widget is driven by `value=`/`index=` read from it. If a widget also
-# had a `key`, Streamlit would keep a second copy of the value under that key and
-# prefer it over `value=`/`index=` on rerun — which makes the widget drift out of
-# sync with `cfg` (a click registers, then snaps back to the stale stored value).
-# Keep these widgets key-less so `cfg` always wins.
+# ---------------------------------------------------------------------------
+# Widget state model
+# ---------------------------------------------------------------------------
+# Every checklist widget uses a STABLE `key` and treats `st.session_state` as
+# the single source of truth (seeded once from `cfg`). This is deliberate:
+# key-less widgets are identified by their render position, so a widget that
+# appears/disappears (e.g. a date input revealed by a checkbox) shifts the
+# identity of every widget below it and makes their state "snap back". Stable
+# keys make identity position-independent, which fixes that.
+#
+# Because a keyed widget owns its value in session_state, config-driven changes
+# (country switch, template load, or gating a control off) must clear/adjust
+# those keys — see `_clear_bound_keys` and the helpers' `force_off` / `pop`.
+
+def _register(key: str):
+    st.session_state.setdefault("_bound_keys", set()).add(key)
+
+
+def _clear_bound_keys():
+    for k in st.session_state.get("_bound_keys", set()):
+        st.session_state.pop(k, None)
+    st.session_state["_bound_keys"] = set()
+
+
 def reset_to_country(country: str):
     st.session_state.config = default_config(country)
+    _clear_bound_keys()
 
 
 def apply_template(name: str):
     st.session_state.config = get_template(name)
+    _clear_bound_keys()
 
 
 cfg = st.session_state.config
+
+
+def _seed(key: str, value):
+    _register(key)
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+def w_checkbox(label, cfg_key, *, disabled=False, force_off=False, on_change=None, help=None):
+    """Keyed checkbox bound to `cfg[cfg_key]`."""
+    _seed(cfg_key, bool(cfg[cfg_key]))
+    if force_off:
+        st.session_state[cfg_key] = False
+    st.checkbox(label, key=cfg_key, disabled=disabled, on_change=on_change, help=help)
+    cfg[cfg_key] = bool(st.session_state[cfg_key])
+    return cfg[cfg_key]
+
+
+def w_number(label, cfg_key, *, min_value=None, step=None, help=None):
+    _seed(cfg_key, cfg[cfg_key])
+    kwargs = {}
+    if min_value is not None:
+        kwargs["min_value"] = min_value
+    if step is not None:
+        kwargs["step"] = step
+    st.number_input(label, key=cfg_key, help=help, **kwargs)
+    cfg[cfg_key] = st.session_state[cfg_key]
+    return cfg[cfg_key]
+
+
+def w_text(label, cfg_key, *, help=None):
+    _seed(cfg_key, cfg[cfg_key])
+    st.text_input(label, key=cfg_key, help=help)
+    cfg[cfg_key] = st.session_state[cfg_key]
+    return cfg[cfg_key]
+
+
+def w_radio(label, cfg_key, options, *, format_func=str, horizontal=False, disabled=False, help=None):
+    _register(cfg_key)
+    # Sanitize the stored selection against the current options.
+    current = st.session_state.get(cfg_key, cfg[cfg_key])
+    st.session_state[cfg_key] = current if current in options else (
+        cfg[cfg_key] if cfg[cfg_key] in options else options[0]
+    )
+    st.radio(label, options, key=cfg_key, format_func=format_func,
+             horizontal=horizontal, disabled=disabled, help=help)
+    cfg[cfg_key] = st.session_state[cfg_key]
+    return cfg[cfg_key]
+
+
+def w_multiselect(label, cfg_key, options, *, help=None):
+    _register(cfg_key)
+    stored = st.session_state.get(cfg_key, cfg[cfg_key]) or []
+    st.session_state[cfg_key] = [x for x in stored if x in options]
+    st.multiselect(label, options=options, key=cfg_key, help=help)
+    cfg[cfg_key] = st.session_state[cfg_key]
+    return cfg[cfg_key]
+
+
+def _excl_on_open_change():
+    # Turning on "only open" clears "only cured" (they're mutually exclusive).
+    if st.session_state.get("filter_collection_end_null"):
+        st.session_state["filter_cured_only"] = False
+
+
+def _excl_on_cured_change():
+    if st.session_state.get("filter_cured_only"):
+        st.session_state["filter_collection_end_null"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -90,9 +177,9 @@ with st.sidebar:
         reset_to_country(new_country)
         st.rerun()
 
-    cfg["output_name"] = st.text_input(
+    w_text(
         "Base name (snake_case)",
-        value=cfg["output_name"],
+        "output_name",
         help="The name of the table that will be saved. Use lowercase letters, numbers, and underscores.",
     )
     # v2 (BR + MX): the source is chosen automatically from the product flags
@@ -170,55 +257,76 @@ with col_left:
         st.subheader("🔍 Filters")
         st.caption("Narrow down which rows go into your base.")
 
-        cfg["filter_snapshot_date"] = st.checkbox(
+        w_checkbox(
             "Filter by snapshot date",
-            value=cfg["filter_snapshot_date"],
+            "filter_snapshot_date",
             help='Keeps only rows from a specific day. Adds: .where($"date" === "<date>")',
         )
         if cfg["filter_snapshot_date"]:
-            cfg["snapshot_date"] = st.text_input(
-                "Date (YYYY-MM-DD)",
-                value=cfg["snapshot_date"],
-            )
+            w_text("Date (YYYY-MM-DD)", "snapshot_date")
 
-        cfg["filter_days_late_range"] = st.checkbox(
+        w_checkbox(
             "Filter by days_late range",
-            value=cfg["filter_days_late_range"],
+            "filter_days_late_range",
             help="Keep customers whose collection is overdue between a min and max number of days.",
         )
         if cfg["filter_days_late_range"]:
             c1, c2 = st.columns(2)
             with c1:
-                cfg["days_late_low"] = st.number_input(
-                    "Min days late",
-                    min_value=0,
-                    value=cfg["days_late_low"],
-                )
+                w_number("Min days late", "days_late_low", min_value=0)
             with c2:
-                cfg["days_late_high"] = st.number_input(
-                    "Max days late",
-                    min_value=0,
-                    value=cfg["days_late_high"],
-                )
+                w_number("Max days late", "days_late_high", min_value=0)
 
-        cfg["filter_customer_type"] = st.checkbox(
+        w_checkbox(
             "Filter by customer type",
-            value=cfg["filter_customer_type"],
+            "filter_customer_type",
             help="Keep only individuals (person) or businesses (company).",
         )
         if cfg["filter_customer_type"]:
-            cfg["customer_type"] = st.radio(
-                "Type",
-                ["person", "company"],
-                index=["person", "company"].index(cfg["customer_type"]),
-                horizontal=True,
-            )
+            w_radio("Type", "customer_type", ["person", "company"], horizontal=True)
 
-        cfg["filter_collection_end_null"] = st.checkbox(
-            "Only open collections (collection__end is null)",
-            value=cfg["filter_collection_end_null"],
+        # "Only open collections" and "only cured collections" are mutually
+        # exclusive (cured collections have ended, so they're never open). The
+        # `on_change` callbacks untick the sibling on the SAME click.
+        w_checkbox(
+            "Only open collections",
+            "filter_collection_end_null",
+            on_change=_excl_on_open_change,
             help="Useful for MX (sr-barriga). In BR the snapshot already filters open ones.",
         )
+        w_checkbox(
+            "Only cured collections",
+            "filter_cured_only",
+            on_change=_excl_on_cured_change,
+            help=(
+                "Keeps only cured collections. Adds: "
+                '.where($"collection__cured" === 1) — reads the native '
+                "`collection__cured` 0/1 column on the daily snapshot."
+            ),
+        )
+        if cfg["filter_collection_end_null"] or cfg["filter_cured_only"]:
+            st.caption(
+                "ℹ️ 'Only open' and 'only cured' are mutually exclusive — "
+                "ticking one unticks the other."
+            )
+
+        filters_is_br = cfg["country"] == "BR"
+        w_checkbox(
+            "Roxinho only",
+            "flag_roxinho",
+            disabled=not filters_is_br,
+            force_off=not filters_is_br,
+            help=(
+                "Filters the base to customers in the current Roxinho list. "
+                "Joins `nu-br/dataset/current-roxinho-customers`, builds a "
+                "`roxinho` column (1 = matched), and keeps only those rows "
+                'via .where($"roxinho" === 1). BR-only dataset.'
+            ),
+        )
+        if not filters_is_br:
+            st.caption(
+                "⚠️ Roxinho only uses a BR-only dataset. Switch to BR to enable."
+            )
 
     # ---------- Derived flags ----------
     with st.container(border=True):
@@ -229,35 +337,16 @@ with col_left:
             "that product (e.g. only credit-card customers)."
         )
 
-        cfg["flag_is_cc"] = st.checkbox(
+        w_checkbox(
             "is_cc — credit-card flag",
-            value=cfg["flag_is_cc"],
+            "flag_is_cc",
             help="Adds an is_cc column (1 if the row is credit-card, 0 otherwise).",
         )
-        cfg["flag_is_ll"] = st.checkbox(
+        w_checkbox(
             "is_ll — lending flag",
-            value=cfg["flag_is_ll"],
+            "flag_is_ll",
             help="Adds an is_ll column (1 if the row is lending, 0 otherwise).",
         )
-
-        cured_help = (
-            "Adds a `cured` column (1 if the collection is cured, 0 otherwise). "
-            + (
-                "BR sources it directly from `collection__cured` on the daily snapshot."
-                if cfg["country"] == "BR"
-                else "MX derives it from `collection__end.isNotNull` (cured = ended)."
-            )
-        )
-        cfg["flag_cured"] = st.checkbox(
-            "cured — collection cured flag",
-            value=cfg["flag_cured"],
-            help=cured_help,
-        )
-        if cfg["flag_cured"] and cfg["filter_collection_end_null"]:
-            st.warning(
-                "⚠️ Cured flag + 'only open collections' filter conflict: cured "
-                "customers (collection__end is set) will be excluded. Untick one."
-            )
 
         # Hint about the auto-filter behavior
         if cfg["flag_is_cc"] and not cfg["flag_is_ll"]:
@@ -271,30 +360,25 @@ with col_right:
         st.subheader("🎯 Segmentation")
         st.caption("Tag each customer with a category for later analysis.")
 
-        cfg["segment_lateness"] = st.checkbox(
+        w_checkbox(
             "lateness — short / long",
-            value=cfg["segment_lateness"],
+            "segment_lateness",
             help="Tags a customer 'long' if their days_late is >= cutoff, otherwise 'short'.",
         )
         if cfg["segment_lateness"]:
-            cfg["lateness_cutoff"] = st.number_input(
-                "Cutoff (days)",
-                min_value=1,
-                value=cfg["lateness_cutoff"],
-            )
+            w_number("Cutoff (days)", "lateness_cutoff", min_value=1)
 
         seg_disabled = not (cfg["flag_is_cc"] and cfg["flag_is_ll"])
-        cfg["segment_product"] = st.checkbox(
+        w_checkbox(
             "segment — cc_only / ll_only / multi_debt",
-            value=cfg["segment_product"] and not seg_disabled,
+            "segment_product",
             disabled=seg_disabled,
+            force_off=seg_disabled,
             help=(
                 "Classifies each customer based on whether they have credit-card debt, "
                 "lending debt, or both. Requires both is_cc AND is_ll flags above."
             ),
         )
-        if seg_disabled and cfg["segment_product"]:
-            cfg["segment_product"] = False
         if seg_disabled:
             st.caption("⚠️ Enable both is_cc and is_ll above to unlock this option.")
 
@@ -305,10 +389,11 @@ with col_right:
         # attaches the column.
         is_br = cfg["country"] == "BR"
         income_label = "Income segments — Mass Market / Super Core / High Income"
-        cfg["segment_income"] = st.checkbox(
+        w_checkbox(
             income_label,
-            value=cfg["segment_income"] and is_br,
+            "segment_income",
             disabled=not is_br,
+            force_off=not is_br,
             help=(
                 "Adds the `income_segments` column (joined from "
                 "`dataset/br-segments-v5`) and keeps only the values you pick "
@@ -316,8 +401,6 @@ with col_right:
                 "all three to just attach the column without filtering."
             ),
         )
-        if not is_br and cfg["segment_income"]:
-            cfg["segment_income"] = False
         if not is_br:
             st.caption("⚠️ Income segments is BR-only.")
 
@@ -332,11 +415,10 @@ with col_right:
             inc_cols = st.columns(len(ALL_INCOME_SEGMENTS))
             for col, value in zip(inc_cols, ALL_INCOME_SEGMENTS):
                 with col:
-                    ticked = st.checkbox(
-                        INCOME_SEGMENT_LABELS[value],
-                        value=value in current_inc,
-                    )
-                    if ticked:
+                    inc_key = f"income_val_{value}"
+                    _seed(inc_key, value in current_inc)
+                    st.checkbox(INCOME_SEGMENT_LABELS[value], key=inc_key)
+                    if st.session_state[inc_key]:
                         picked.append(value)
             cfg["income_segment_values"] = picked
 
@@ -360,22 +442,14 @@ with col_right:
         has_late = cfg["segment_lateness"]
         any_seg = has_seg or has_late
 
-        # Determine the current top-level mode from the config flags
+        # Initial mode derived from the config flags (used only to seed the
+        # keyed widget the first time / after a reset).
         if cfg.get("multi_save_mode", "none") != "none":
             current_mode = "multi"
         elif cfg.get("filter_segment_only"):
             current_mode = "single"
         else:
             current_mode = "all"
-
-        # Reset to "all" if the prerequisites are no longer met
-        if not any_seg and current_mode != "all":
-            current_mode = "all"
-            cfg["filter_segment_only"] = False
-            cfg["multi_save_mode"] = "none"
-        elif not has_seg and current_mode == "single":
-            current_mode = "all"
-            cfg["filter_segment_only"] = False
 
         mode_labels = {
             "all": "Keep all segments in one save",
@@ -387,11 +461,23 @@ with col_right:
             "single": not has_seg,
             "multi": not any_seg,
         }
+        mode_options = list(mode_labels.keys())
 
-        new_mode = st.radio(
+        # Keyed radio: session_state is the source of truth. Sanitize the
+        # stored selection against the current prerequisites BEFORE rendering
+        # (Streamlit forbids mutating a widget's state after it's created).
+        _register("ui_split_mode")
+        stored_mode = st.session_state.get("ui_split_mode", current_mode)
+        if not any_seg or stored_mode not in mode_options:
+            stored_mode = "all"
+        elif not has_seg and stored_mode == "single":
+            stored_mode = "all"
+        st.session_state["ui_split_mode"] = stored_mode
+
+        st.radio(
             "Split mode",
-            options=list(mode_labels.keys()),
-            index=list(mode_labels.keys()).index(current_mode),
+            options=mode_options,
+            key="ui_split_mode",
             format_func=lambda k: mode_labels[k]
             + ("  (needs segment classification)" if mode_disabled[k] and k == "single"
                else "  (needs segment or lateness)" if mode_disabled[k] and k == "multi"
@@ -405,20 +491,14 @@ with col_right:
                 "(by segment, by lateness, or both)."
             ),
         )
-        if mode_disabled.get(new_mode, False):
-            new_mode = "all"
+        new_mode = st.session_state["ui_split_mode"]
         cfg["filter_segment_only"] = (new_mode == "single")
         if new_mode != "multi":
             cfg["multi_save_mode"] = "none"
 
         # ----- Single-segment filter -----
         if new_mode == "single":
-            cfg["segment_only_value"] = st.radio(
-                "Segment to keep",
-                ALL_SEGMENTS,
-                index=ALL_SEGMENTS.index(cfg.get("segment_only_value", "cc_only")),
-                horizontal=True,
-            )
+            w_radio("Segment to keep", "segment_only_value", ALL_SEGMENTS, horizontal=True)
 
         # ----- Multi-save sub-mode + subset pickers -----
         if new_mode == "multi":
@@ -438,32 +518,23 @@ with col_right:
                 "segment_lateness": "By segment × lateness (cross product)",
             }
 
-            current_sub = cfg.get("multi_save_mode", "none")
-            if current_sub not in available_submodes:
-                current_sub = available_submodes[0]
-
-            new_sub = st.radio(
+            new_sub = w_radio(
                 "Multi-save by",
-                options=available_submodes,
-                index=available_submodes.index(current_sub),
+                "multi_save_mode",
+                available_submodes,
                 format_func=lambda k: sub_labels[k],
                 help=(
                     "Pick the dimension(s) to split on. Each unique combination "
                     "of values becomes its own saved table."
                 ),
             )
-            cfg["multi_save_mode"] = new_sub
 
             # Subset pickers
             if new_sub in ("segment", "segment_lateness"):
-                current_segs = [
-                    s for s in cfg.get("multi_save_segments", ALL_SEGMENTS)
-                    if s in ALL_SEGMENTS
-                ] or list(ALL_SEGMENTS)
-                cfg["multi_save_segments"] = st.multiselect(
+                w_multiselect(
                     "Which segments?",
-                    options=ALL_SEGMENTS,
-                    default=current_segs,
+                    "multi_save_segments",
+                    ALL_SEGMENTS,
                     help=(
                         "Pick 1 or more segments. Tip: untick to skip a segment "
                         "(e.g. leave 'multi_debt' off if you only want CC-only and LL-only)."
@@ -473,14 +544,10 @@ with col_right:
                     st.warning("Pick at least one segment.")
 
             if new_sub in ("lateness", "segment_lateness"):
-                current_lates = [
-                    l for l in cfg.get("multi_save_lateness", ALL_LATENESS)
-                    if l in ALL_LATENESS
-                ] or list(ALL_LATENESS)
-                cfg["multi_save_lateness"] = st.multiselect(
+                w_multiselect(
                     "Which lateness values?",
-                    options=ALL_LATENESS,
-                    default=current_lates,
+                    "multi_save_lateness",
+                    ALL_LATENESS,
                     help=(
                         "Pick 'short', 'long', or both. With just one selected this "
                         "behaves more like a filter — pick both for the typical case."
@@ -521,9 +588,9 @@ with col_right:
                 "Usually required for BR research / outbound bases."
             )
 
-        cfg["apply_forbidden_tags_filter"] = st.checkbox(
+        w_checkbox(
             f"Apply forbidden_tags filter ({len(country_tags)} tags · {cfg['country']})",
-            value=cfg["apply_forbidden_tags_filter"],
+            "apply_forbidden_tags_filter",
             help=compliance_help,
         )
 
@@ -536,36 +603,6 @@ with col_right:
         with st.expander(f"See the {len(country_tags)} {cfg['country']} tags"):
             st.write(", ".join(f"`{t}`" for t in country_tags))
 
-    # ---------- Enrichment (BR-only join-based extras) ----------
-    with st.container(border=True):
-        st.subheader("🧩 Enrichment")
-        st.caption(
-            "Attach extra info to your base by joining BR-only lookup datasets."
-        )
-
-        is_br = cfg["country"] == "BR"
-
-        cfg["flag_roxinho"] = st.checkbox(
-            "Roxinho only flag",
-            value=cfg["flag_roxinho"],
-            disabled=not is_br,
-            help=(
-                "Filters the base to customers in the current Roxinho list. "
-                "Joins `nu-br/dataset/current-roxinho-customers`, builds a "
-                "`roxinho` column (1 = matched), and keeps only those rows "
-                "via `.where($\"roxinho\" === 1)`."
-            ),
-        )
-
-        if not is_br:
-            st.caption(
-                "⚠️ This enrichment uses a BR-only dataset. Switch to BR to enable, "
-                "or leave it off for MX."
-            )
-            # Defensive: force off in MX to keep config consistent
-            if cfg["flag_roxinho"]:
-                cfg["flag_roxinho"] = False
-
     # ---------- Output ----------
     with st.container(border=True):
         st.subheader("💾 Output")
@@ -573,13 +610,13 @@ with col_right:
 
         avail_cols = available_select_columns(cfg)
 
-        # Keep only currently-valid selections — drop any that became
-        # unavailable when the user toggled checks above
-        current = [c for c in cfg["select_columns"] if c in avail_cols]
-        cfg["select_columns"] = st.multiselect(
+        # Keyed multiselect: session_state is the source of truth. Options can
+        # shrink when the user toggles checks above, so w_multiselect drops any
+        # now-invalid selections before rendering (avoids a Streamlit error).
+        w_multiselect(
             "Columns to keep",
-            options=avail_cols,
-            default=current,
+            "select_columns",
+            avail_cols,
             help=(
                 "Only columns that exist on the base at this point are listed — "
                 "this prevents typos and 'column not found' errors when you run the notebook."
@@ -588,9 +625,9 @@ with col_right:
         if not cfg["select_columns"]:
             st.warning("Pick at least one column.")
 
-        cfg["limit_enabled"] = st.checkbox(
+        w_checkbox(
             "Base sample size",
-            value=cfg["limit_enabled"],
+            "limit_enabled",
             help="Caps how many rows end up in the saved base. Useful for tests / research samples.",
         )
         if cfg["limit_enabled"]:
@@ -599,12 +636,7 @@ with col_right:
 
             if not in_multi or not combos:
                 # Single-save: one input controls the only output.
-                cfg["limit_value"] = st.number_input(
-                    "Number of rows",
-                    min_value=1,
-                    value=cfg["limit_value"],
-                    step=10000,
-                )
+                w_number("Number of rows", "limit_value", min_value=1, step=10000)
             else:
                 # Multi-save: one input per resulting table. Useful when, e.g.,
                 # the "long overdue" base needs 500k rows but the "short overdue"
@@ -621,14 +653,15 @@ with col_right:
 
                 for (seg, late), table in zip(combos, names):
                     key = combo_key(seg, late)
-                    seed = int(existing.get(key, cfg["limit_value"]))
-                    val = st.number_input(
+                    ss_key = f"limit_combo_{key}"
+                    _seed(ss_key, int(existing.get(key, cfg["limit_value"])))
+                    st.number_input(
                         f"Rows for `{table}`",
                         min_value=1,
-                        value=seed,
                         step=10000,
+                        key=ss_key,
                     )
-                    new_overrides[key] = int(val)
+                    new_overrides[key] = int(st.session_state[ss_key])
 
                 cfg["limit_values"] = new_overrides
 
@@ -647,9 +680,9 @@ with st.expander("⚙️ Advanced settings", expanded=cfg["groupby_customer_id"]
         st.subheader("📊 Aggregation")
         st.caption("Collapse multiple rows per customer into a single row.")
 
-        cfg["groupby_customer_id"] = st.checkbox(
+        w_checkbox(
             "Group by customer__id (one row per customer)",
-            value=cfg["groupby_customer_id"],
+            "groupby_customer_id",
             help=(
                 "Useful when a single customer has multiple collections and you want one row each. "
                 "Applies max() on the flags and on product__days_late."

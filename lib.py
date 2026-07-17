@@ -313,12 +313,13 @@ def default_config(country: str = "BR") -> dict:
         "filter_customer_type": False,
         "customer_type": "person",
         "filter_collection_end_null": filter_collection_end_null,
+        # Keep only cured collections (collection__cured === 1).
+        "filter_cured_only": False,
+        # Roxinho-only filter (BR-only dataset join + keep matched rows).
+        "flag_roxinho": False,
         # ----- Derived flags -----
         "flag_is_cc": False,
         "flag_is_ll": False,
-        "flag_cured": False,
-        # ----- Enrichment (BR-only datasets) -----
-        "flag_roxinho": False,
         # ----- Income segments (BR-only segmentation) -----
         "segment_income": False,
         # Which income_segments values to keep — strict subset filters the
@@ -484,6 +485,10 @@ def summarize_config(cfg: dict) -> list[str]:
         out.append(f"Customer type = {cfg.get('customer_type')}")
     if cfg.get("filter_collection_end_null"):
         out.append("Only open collections (collection__end is null)")
+    if cfg.get("filter_cured_only"):
+        out.append("Cured collections only (collection__cured = 1)")
+    if cfg.get("flag_roxinho"):
+        out.append("Roxinho-only filter")
 
     # ----- Derived flags -----
     cc, ll = cfg.get("flag_is_cc"), cfg.get("flag_is_ll")
@@ -493,8 +498,6 @@ def summarize_config(cfg: dict) -> list[str]:
         out.append("Flag: is_cc only → base filtered to credit-card")
     elif ll:
         out.append("Flag: is_ll only → base filtered to lending")
-    if cfg.get("flag_cured"):
-        out.append("cured — collection cured flag")
 
     # ----- Aggregation -----
     if cfg.get("groupby_customer_id"):
@@ -526,10 +529,6 @@ def summarize_config(cfg: dict) -> list[str]:
     if cfg.get("apply_forbidden_tags_filter"):
         n = len(forbidden_tags_for(cfg.get("country", "BR")))
         out.append(f"forbidden_tags compliance filter ({n} tags)")
-
-    # ----- Enrichment -----
-    if cfg.get("flag_roxinho"):
-        out.append("Roxinho-only filter")
 
     # ----- Output -----
     cols = cfg.get("select_columns") or []
@@ -606,11 +605,6 @@ def available_select_columns(cfg: dict) -> list[str]:
         for c in ENRICHABLE_FROM_CUSTOMERS:
             if c not in cols:
                 cols.append(c)
-
-    # Cured flag — exposed as `cured` (from the native collection__cured 0/1
-    # column on both BR and MX in the v2 split datasets).
-    if cfg.get("flag_cured") and "cured" not in cols:
-        cols.append("cured")
 
     # Roxinho flag — produced at save time from a left join + coalesce
     if cfg.get("flag_roxinho") and "roxinho" not in cols:
@@ -776,13 +770,14 @@ def validate_config(cfg: dict) -> tuple[list[str], list[str]]:
                         "Test bases usually stay under ~150,000."
                     )
 
-    # Cured flag interacts with the open-collection filter: if you only keep
-    # rows where collection__end is null, the cured customers are gone.
-    if cfg.get("flag_cured") and cfg.get("filter_collection_end_null"):
+    # The cured-only filter interacts with the open-collection filter: keeping
+    # only cured collections AND only open ones (collection__end is null) will
+    # almost certainly yield an empty base.
+    if cfg.get("filter_cured_only") and cfg.get("filter_collection_end_null"):
         warnings.append(
-            "Cured flag is on but you're also filtering to open collections "
-            "(collection__end is null). Cured customers will be excluded — "
-            "disable the open-collection filter if you want both cured and not-cured."
+            "'Cured collections only' and 'only open collections' are both on. "
+            "Cured collections have usually ended (collection__end is set), so "
+            "combining these filters will likely produce an empty base — disable one."
         )
 
     # BR-only enrichments — warn if turned on for MX
@@ -846,8 +841,6 @@ def _columns_produced_by_base(cfg: dict) -> set[str]:
             cols.add(isll)
         if cfg.get("filter_days_late_range") or cfg.get("segment_lateness"):
             cols.add(days_late_col)
-        if cfg.get("flag_cured"):
-            cols.add("cured")
         if is_mx:
             # MX groupBy keys include prototype
             cols.add("prototype")
@@ -858,8 +851,6 @@ def _columns_produced_by_base(cfg: dict) -> set[str]:
             cols.add(iscc)
         if cfg.get("flag_is_ll"):
             cols.add(isll)
-        if cfg.get("flag_cured"):
-            cols.add("cured")
 
     # Segments are added AFTER groupBy
     if cfg.get("segment_lateness"):
@@ -1077,29 +1068,13 @@ def _render_filters(cfg: dict) -> list[str]:
         L.append(f'  .where($"customer__type" === "{cfg["customer_type"]}")')
     if cfg.get("filter_collection_end_null"):
         L.append('  .where($"collection__end".isNull)')
+    if cfg.get("filter_cured_only"):
+        L.append(f'  .where($"{_col(cfg, "cured")}" === 1)')
 
     if cfg.get("filter_days_late_range"):
         L.append(f'  .where($"{days_late_col}" >= {cfg["days_late_low"]})')
         L.append(f'  .where($"{days_late_col}" <= {cfg["days_late_high"]})')
 
-    return L
-
-
-def _render_flags(cfg: dict) -> list[str]:
-    """Render the cured column.
-
-    v2 split model (BR + MX): the product flags (is_cc / is_ll) are tagged at
-    the source in `_render_base_source` — each row's product is implied by
-    which dataset (CC vs LL) it came from — so there's nothing to derive here
-    and no exclusivity filter is needed (a CC-only base just reads CC).
-
-    Cured: both countries now read the native `collection__cured` 0/1 column
-    (name centralized in COLUMN_NAMES); we just rename it to `cured` for
-    friendlier output.
-    """
-    L = []
-    if cfg.get("flag_cured"):
-        L.append(f'  .withColumn("cured", $"{_col(cfg, "cured")}")')
     return L
 
 
@@ -1126,8 +1101,6 @@ def _render_groupby(cfg: dict) -> list[str]:
         aggs.append(isll)
     if cfg.get("filter_days_late_range") or cfg.get("segment_lateness"):
         aggs.append(days_late_col)
-    if cfg.get("flag_cured"):
-        aggs.append("cured")
 
     L = []
     if is_mx:
@@ -1481,7 +1454,6 @@ def _render_base_block(cfg: dict) -> list[str]:
     L.append("")
     L.extend(_render_base_source(cfg))
     L.extend(_render_filters(cfg))
-    L.extend(_render_flags(cfg))
     L.extend(_render_groupby(cfg))
     L.extend(_render_segments(cfg))
     L.append("")

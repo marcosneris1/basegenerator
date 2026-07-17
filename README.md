@@ -78,18 +78,16 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, and walk throu
 
 ### Sections
 
-1. **🔍 Filters** — snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`.
-2. **🏷️ Derived flags** — `is_cc`, `is_ll`, and `cured`. If only one of CC / LL is ticked, the base is auto-filtered to that product. `cured` uses `collection__cured` on BR (already a column) and derives from `collection__end.isNotNull` on MX.
+1. **🔍 Filters** — snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`, **cured collections only** (`.where($"collection__cured" === 1)`), and **Roxinho only** (BR-only; joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then filters to `roxinho === 1`).
+2. **🏷️ Derived flags** — `is_cc`, `is_ll`. If only one of CC / LL is ticked, the base is auto-filtered to that product.
 3. **🎯 Segmentation** — `lateness` (short / long with configurable cutoff), `segment` (`cc_only` / `ll_only` / `multi_debt`, requires both product flags), and **income segments** (`mass_market` / `super_core` / `high_income`, BR-only, joined from `dataset/br-segments-v5`).
    - **Split mode**: *Keep all segments*, *Filter to one segment*, or **Multi-save** — see below.
 4. **🔒 Compliance** — applies the canonical `forbidden_tags` filter. BR uses `lib.FORBIDDEN_TAGS_BR` against `contract-customers/customers`; MX uses `lib.FORBIDDEN_TAGS_MX` against `sr-barriga/daily-snapshot` (lower-cased, substring match via `containsAny`).
-5. **🧩 Enrichment** — optional BR-only joins.
-   - **Roxinho only flag** — joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then filters to `roxinho === 1`.
-6. **💾 Output** — `select_columns` is a multiselect (lists only currently-available columns to prevent typos), plus a row-cap (**Number of rows** input).
+5. **💾 Output** — `select_columns` is a multiselect (lists only currently-available columns to prevent typos), plus a row-cap (**Number of rows** input).
 
 ### ⚙️ Advanced settings (expander)
 
-- **Aggregation** — `groupBy("customer__id")` with `max(...)` on flags + `days_late` + `cured`. On MX the key is `("customer__id", "prototype")` and the helper used is `maximo(...)` instead of `max(...).as(...)`.
+- **Aggregation** — `groupBy("customer__id")` with `max(...)` on flags + `days_late`. On MX the key is `("customer__id", "prototype")` and the helper used is `maximo(...)` instead of `max(...).as(...)`.
 
 ## Multi-save
 
@@ -202,8 +200,8 @@ task — consider leaving it partitioned and downloading parts instead.
 - Invalid snapshot date format.
 - Per-save row caps validated individually in multi-save mode.
 - `select_columns` must be non-empty; entries not in `available_select_columns(cfg)` flagged as typos.
-- BR-only enrichments turned on for MX (Roxinho, income segments) → warning.
-- `cured` flag combined with `collection__end IS NULL` filter → warning (the filter excludes everyone who is cured).
+- BR-only features turned on for MX (Roxinho, income segments) → warning.
+- `cured collections only` combined with `collection__end IS NULL` filter → warning (cured collections have usually ended, so the combination is likely empty).
 - Multi-save mode with empty subset selections → error.
 
 ## Architecture notes (worth preserving)
