@@ -104,12 +104,13 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, then walk thro
 ### Main sections
 
 1. **🔍 Filters** — narrow which rows enter the base:
+   - **Use current snapshot** (BR-only) → reads the current-snapshot v2 datasets (`collections-cc/ll-portfolio-current-snapshot-v2`), i.e. the latest state per collection, instead of the daily snapshots. Mutually exclusive with the snapshot-date filter (disables it).
    - Snapshot date → `.where($"date" === "YYYY-MM-DD")`
    - `days_late` range (min/max)
    - Customer type (person / company)
    - Open collections only → `.where($"collection__end".isNull)` (MX default: on)
    - **Cured collections only** → `.where($"collection__cured" === 1)`. Both BR and MX read the native `collection__cured` 0/1 column.
-2. **💜 Nubank customer tier** (BR-only) — one filter per tier. Each joins the tier's `customer__id` lookup, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). Ticking more than one ANDs them. Tiers (see `CUSTOMER_TIERS` in `lib.py`):
+2. **💜 Nubank customer tier** (BR-only) — one filter per tier. Each joins the tier's `customer__id` lookup, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). The tiers are **mutually exclusive** — only one can be selected at a time. Tiers (see `CUSTOMER_TIERS` in `lib.py`):
    - **Roxinho** → `nu-br/dataset/current-roxinho-customers` (col `roxinho`)
    - **Ultravioleta (UV)** → `nu-br/dataset/current-uv-customers` (col `uv`)
    - **Nubank+** → `nu-br/dataset/current-nu-plus-customers` (col `nu_plus`)
@@ -208,6 +209,7 @@ The entire app state is a **flat dict** stored at `st.session_state.config`, pro
 | `imports_uc_path` | str | Path passed to `%run` (helpers notebook). |
 | `primary_dataset_path` | str | Nominal only — the real source is derived from the product flags (CC / LL / union) for both BR and MX. Kept for config shape. |
 | `primary_dataset_alias` | str | Nominal only (see above). |
+| `use_current_snapshot` | bool | BR-only. Read the current-snapshot v2 datasets (latest state per collection) instead of the daily ones; disables `filter_snapshot_date`. |
 | `filter_snapshot_date` / `snapshot_date` | bool / str | `.where($"date" === ...)` filter (ISO date). |
 | `filter_days_late_range` / `days_late_low` / `days_late_high` | bool / int / int | Min/max overdue-days filter. |
 | `filter_customer_type` / `customer_type` | bool / `"person" \| "company"` | Customer-type filter. |

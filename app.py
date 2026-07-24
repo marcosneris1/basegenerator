@@ -161,6 +161,16 @@ def _excl_on_cured_change():
         st.session_state["filter_collection_end_null"] = False
 
 
+def _make_tier_excl(active_flag: str):
+    """Customer tiers are mutually exclusive: ticking one clears the others."""
+    def _cb():
+        if st.session_state.get(active_flag):
+            for t in CUSTOMER_TIERS:
+                if t["flag"] != active_flag:
+                    st.session_state[t["flag"]] = False
+    return _cb
+
+
 # ---------------------------------------------------------------------------
 # Sidebar — settings & templates
 # ---------------------------------------------------------------------------
@@ -258,11 +268,38 @@ with col_left:
         st.subheader("🔍 Filters")
         st.caption("Narrow down which rows go into your base.")
 
+        # Current snapshot (BR-only): read the current-snapshot datasets
+        # instead of the daily ones. Mutually exclusive with "filter by
+        # snapshot date" (a current snapshot has no date dimension to filter).
+        current_is_br = cfg["country"] == "BR"
+        w_checkbox(
+            "Use current snapshot",
+            "use_current_snapshot",
+            disabled=not current_is_br,
+            force_off=not current_is_br,
+            help=(
+                "Uses the most recent state of the collection (reads the "
+                "current-snapshot datasets instead of the daily snapshots). "
+                "Disables 'Filter by snapshot date', which doesn't apply here."
+            ),
+        )
+        if not current_is_br:
+            st.caption(
+                "⚠️ Current snapshot uses BR-only datasets. Switch to BR to enable."
+            )
+
         w_checkbox(
             "Filter by snapshot date",
             "filter_snapshot_date",
+            disabled=cfg["use_current_snapshot"],
+            force_off=cfg["use_current_snapshot"],
             help='Keeps only rows from a specific day. Adds: .where($"date" === "<date>")',
         )
+        if cfg["use_current_snapshot"]:
+            st.caption(
+                "ℹ️ Disabled because 'Use current snapshot' is on — the current "
+                "snapshot already holds only the latest state per collection."
+            )
         if cfg["filter_snapshot_date"]:
             w_text("Date (YYYY-MM-DD)", "snapshot_date")
 
@@ -317,7 +354,7 @@ with col_left:
         st.caption(
             "Keep only customers in a given Nubank tier. Each option joins the "
             "tier's dataset, builds a 1/0 column, and keeps only matched rows. "
-            "Ticking more than one keeps customers in **all** the picked tiers."
+            "Only one tier can be selected at a time."
         )
 
         tier_is_br = cfg["country"] == "BR"
@@ -327,6 +364,7 @@ with col_left:
                 tier["flag"],
                 disabled=not tier_is_br,
                 force_off=not tier_is_br,
+                on_change=_make_tier_excl(tier["flag"]),
                 help=(
                     f"Filters the base to customers in the current {tier['label']} "
                     f"list. Joins `{tier['dataset']}`, builds a `{tier['col']}` "

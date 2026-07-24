@@ -338,6 +338,9 @@ def default_config(country: str = "BR") -> dict:
         "days_late_high": days_late_high,
         "filter_customer_type": False,
         "customer_type": "person",
+        # BR-only: read the current-snapshot datasets (latest state per
+        # collection) instead of the daily snapshots.
+        "use_current_snapshot": False,
         "filter_collection_end_null": filter_collection_end_null,
         # Keep only cured collections (collection__cured === 1).
         "filter_cured_only": False,
@@ -504,6 +507,8 @@ def summarize_config(cfg: dict) -> list[str]:
     out.append(f"Source: {source_description(cfg)}")
 
     # ----- Filters -----
+    if _use_current_snapshot(cfg):
+        out.append("Current snapshot (latest state per collection)")
     if cfg.get("filter_snapshot_date"):
         out.append(f"Snapshot date = {cfg.get('snapshot_date')}")
     if cfg.get("filter_days_late_range"):
@@ -928,10 +933,18 @@ def _wants_cc_ll(cfg: dict) -> tuple[bool, bool]:
     return cc, ll
 
 
+def _use_current_snapshot(cfg: dict) -> bool:
+    """BR-only: whether to read the current-snapshot datasets (latest state
+    per collection) instead of the daily snapshots."""
+    return cfg.get("country") == "BR" and bool(cfg.get("use_current_snapshot"))
+
+
 def _collections_v2_paths(cfg: dict) -> tuple[str, str]:
     """Return the (cc_path, ll_path) collections datasets for the country."""
     if cfg.get("country") == "MX":
         return MX_CC_DAILY, MX_LL_DAILY
+    if _use_current_snapshot(cfg):
+        return BR_CC_CURRENT_V2, BR_LL_CURRENT_V2
     return BR_CC_DAILY_V2, BR_LL_DAILY_V2
 
 
@@ -955,7 +968,12 @@ def source_description(cfg: dict) -> str:
     based on the product flags (country-aware). For the UI."""
     cc, ll = _wants_cc_ll(cfg)
     neither = not cfg.get("flag_is_cc") and not cfg.get("flag_is_ll")
-    label = "CC daily / LL daily" if cfg.get("country") == "MX" else "CC v2 / LL v2"
+    if cfg.get("country") == "MX":
+        label = "CC daily / LL daily"
+    elif _use_current_snapshot(cfg):
+        label = "CC current v2 / LL current v2"
+    else:
+        label = "CC v2 / LL v2"
     cc_name, ll_name = (lbl.strip() for lbl in label.split("/"))
     if cc and ll:
         suffix = " (no product flag set → all collections)" if neither else ""

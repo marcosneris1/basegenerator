@@ -78,8 +78,8 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, and walk throu
 
 ### Sections
 
-1. **🔍 Filters** — snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`, and **cured collections only** (`.where($"collection__cured" === 1)`).
-2. **💜 Nubank customer tier** (BR-only) — keep only customers in a given tier. Each option joins the tier's dataset, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). Ticking more than one keeps customers in **all** picked tiers (AND):
+1. **🔍 Filters** — **use current snapshot** (BR-only; reads the current-snapshot v2 datasets — the latest state per collection — instead of the daily ones; disables the snapshot-date filter), snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`, and **cured collections only** (`.where($"collection__cured" === 1)`).
+2. **💜 Nubank customer tier** (BR-only) — keep only customers in a given tier. Each option joins the tier's dataset, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). The tiers are **mutually exclusive** — only one can be selected at a time:
    - **Roxinho only** → `nu-br/dataset/current-roxinho-customers`
    - **Ultravioleta (UV) only** → `nu-br/dataset/current-uv-customers`
    - **Nubank+ only** → `nu-br/dataset/current-nu-plus-customers`
