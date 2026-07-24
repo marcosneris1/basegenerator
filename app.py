@@ -16,6 +16,7 @@ from lib import (
     ALL_INCOME_SEGMENTS,
     ALL_LATENESS,
     ALL_SEGMENTS,
+    CUSTOMER_TIERS,
     INCOME_SEGMENT_LABELS,
     KNOWN_DATASETS,
     LEGACY_BR_COLLECTIONS,
@@ -310,22 +311,32 @@ with col_left:
                 "ticking one unticks the other."
             )
 
-        filters_is_br = cfg["country"] == "BR"
-        w_checkbox(
-            "Roxinho only",
-            "flag_roxinho",
-            disabled=not filters_is_br,
-            force_off=not filters_is_br,
-            help=(
-                "Filters the base to customers in the current Roxinho list. "
-                "Joins `nu-br/dataset/current-roxinho-customers`, builds a "
-                "`roxinho` column (1 = matched), and keeps only those rows "
-                'via .where($"roxinho" === 1). BR-only dataset.'
-            ),
+    # ---------- Nubank customer tier ----------
+    with st.container(border=True):
+        st.subheader("💜 Nubank customer tier")
+        st.caption(
+            "Keep only customers in a given Nubank tier. Each option joins the "
+            "tier's dataset, builds a 1/0 column, and keeps only matched rows. "
+            "Ticking more than one keeps customers in **all** the picked tiers."
         )
-        if not filters_is_br:
+
+        tier_is_br = cfg["country"] == "BR"
+        for tier in CUSTOMER_TIERS:
+            w_checkbox(
+                f"{tier['label']} only",
+                tier["flag"],
+                disabled=not tier_is_br,
+                force_off=not tier_is_br,
+                help=(
+                    f"Filters the base to customers in the current {tier['label']} "
+                    f"list. Joins `{tier['dataset']}`, builds a `{tier['col']}` "
+                    f"column (1 = matched), and keeps only those rows via "
+                    f'.where($"{tier["col"]}" === 1). BR-only dataset.'
+                ),
+            )
+        if not tier_is_br:
             st.caption(
-                "⚠️ Roxinho only uses a BR-only dataset. Switch to BR to enable."
+                "⚠️ Customer tier filters use BR-only datasets. Switch to BR to enable."
             )
 
     # ---------- Derived flags ----------

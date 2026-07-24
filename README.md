@@ -78,12 +78,17 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, and walk throu
 
 ### Sections
 
-1. **🔍 Filters** — snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`, **cured collections only** (`.where($"collection__cured" === 1)`), and **Roxinho only** (BR-only; joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then filters to `roxinho === 1`).
-2. **🏷️ Derived flags** — `is_cc`, `is_ll`. If only one of CC / LL is ticked, the base is auto-filtered to that product.
-3. **🎯 Segmentation** — `lateness` (short / long with configurable cutoff), `segment` (`cc_only` / `ll_only` / `multi_debt`, requires both product flags), and **income segments** (`mass_market` / `super_core` / `high_income`, BR-only, joined from `dataset/br-segments-v5`).
+1. **🔍 Filters** — snapshot date, `days_late` range, customer type (person / company), `collection__end IS NULL`, and **cured collections only** (`.where($"collection__cured" === 1)`).
+2. **💜 Nubank customer tier** (BR-only) — keep only customers in a given tier. Each option joins the tier's dataset, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). Ticking more than one keeps customers in **all** picked tiers (AND):
+   - **Roxinho only** → `nu-br/dataset/current-roxinho-customers`
+   - **Ultravioleta (UV) only** → `nu-br/dataset/current-uv-customers`
+   - **Nubank+ only** → `nu-br/dataset/current-nu-plus-customers`
+   - **Under 18 (U18) only** → `nu-br/dataset/current-underage-customers-ids`
+3. **🏷️ Derived flags** — `is_cc`, `is_ll`. If only one of CC / LL is ticked, the base is auto-filtered to that product.
+4. **🎯 Segmentation** — `lateness` (short / long with configurable cutoff), `segment` (`cc_only` / `ll_only` / `multi_debt`, requires both product flags), and **income segments** (`mass_market` / `super_core` / `high_income`, BR-only, joined from `dataset/br-segments-v5`).
    - **Split mode**: *Keep all segments*, *Filter to one segment*, or **Multi-save** — see below.
-4. **🔒 Compliance** — applies the canonical `forbidden_tags` filter. BR uses `lib.FORBIDDEN_TAGS_BR` against `contract-customers/customers`; MX uses `lib.FORBIDDEN_TAGS_MX` against `sr-barriga/daily-snapshot` (lower-cased, substring match via `containsAny`).
-5. **💾 Output** — `select_columns` is a multiselect (lists only currently-available columns to prevent typos), plus a row-cap (**Number of rows** input).
+5. **🔒 Compliance** — applies the canonical `forbidden_tags` filter. BR uses `lib.FORBIDDEN_TAGS_BR` against `contract-customers/customers`; MX uses `lib.FORBIDDEN_TAGS_MX` against `sr-barriga/daily-snapshot` (lower-cased, substring match via `containsAny`).
+6. **💾 Output** — `select_columns` is a multiselect (lists only currently-available columns to prevent typos), plus a row-cap (**Number of rows** input).
 
 ### ⚙️ Advanced settings (expander)
 
@@ -101,8 +106,8 @@ A live preview shows the table names the run will produce, and each save block g
 
 ## Country handling
 
-- **BR** — full coverage: `forbidden_tags`, `customers` re-attachment to carry `prototype` through a `groupBy`, Roxinho + income-segments enrichment, full validation set.
-- **MX** — same split-source model as BR: the source is derived from the product flags using the new CC/LL daily datasets (union when both), each row tagged `is_cc` / `is_ll` by origin, `days_late` (`product__days_late`) and `cured` (`collection__cured`) read natively, and `prototype` carried through the `groupBy` natively. The MX-specific `forbidden_tags` substring filter pulls `customer__tags` from the SR Barriga daily snapshot. The Roxinho and income-segments enrichments are BR-only and auto-disabled in MX.
+- **BR** — full coverage: `forbidden_tags`, `customers` re-attachment to carry `prototype` through a `groupBy`, Nubank customer tier filters (Roxinho / UV / Nubank+ / U18) + income-segments enrichment, full validation set.
+- **MX** — same split-source model as BR: the source is derived from the product flags using the new CC/LL daily datasets (union when both), each row tagged `is_cc` / `is_ll` by origin, `days_late` (`product__days_late`) and `cured` (`collection__cured`) read natively, and `prototype` carried through the `groupBy` natively. The MX-specific `forbidden_tags` substring filter pulls `customer__tags` from the SR Barriga daily snapshot. The Nubank customer tier and income-segments enrichments are BR-only and auto-disabled in MX.
 
 Switching country in the sidebar resets the checklist to that country's defaults.
 
@@ -200,7 +205,7 @@ task — consider leaving it partitioned and downloading parts instead.
 - Invalid snapshot date format.
 - Per-save row caps validated individually in multi-save mode.
 - `select_columns` must be non-empty; entries not in `available_select_columns(cfg)` flagged as typos.
-- BR-only features turned on for MX (Roxinho, income segments) → warning.
+- BR-only features turned on for MX (Nubank customer tiers, income segments) → warning.
 - `cured collections only` combined with `collection__end IS NULL` filter → warning (cured collections have usually ended, so the combination is likely empty).
 - Multi-save mode with empty subset selections → error.
 
@@ -209,7 +214,7 @@ task — consider leaving it partitioned and downloading parts instead.
 - **`lib.py` has zero Streamlit imports** — pure logic, importable and unit-testable from anywhere.
 - **Config is a flat dict**, not a class — easier to serialize, persist, and edit live.
 - **The renderer assembles fragments**, not a single string-template. Each section (`_render_filters`, `_render_flags`, `_render_groupby`, `_render_segments`, `_render_save_block`, `_render_one_save`, …) returns a list of lines, concatenated in `render_scala()`.
-- **Dedup discipline on right-side lookups** — every dataset joined on `customer__id` (`customers`, `brSegments`, `roxinhoCustomers`) is deduped before the join so a downstream `groupBy("customer__id")` is never re-inflated.
+- **Dedup discipline on right-side lookups** — every dataset joined on `customer__id` (`customers`, `brSegments`, and the customer-tier lookups like `roxinhoCustomers` / `uvCustomers`) is deduped before the join so a downstream `groupBy("customer__id")` is never re-inflated.
 - **Multi-save** is a thin wrapper around `_render_one_save(...)`, called once per `(segment, lateness)` combo with the appropriate `where` overrides and a table-name suffix.
 
 ## Limitations

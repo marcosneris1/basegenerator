@@ -109,16 +109,20 @@ Pick **BR** or **MX** in the sidebar, optionally load a template, then walk thro
    - Customer type (person / company)
    - Open collections only → `.where($"collection__end".isNull)` (MX default: on)
    - **Cured collections only** → `.where($"collection__cured" === 1)`. Both BR and MX read the native `collection__cured` 0/1 column.
-   - **Roxinho only** (BR-only) — joins `nu-br/dataset/current-roxinho-customers`, builds a `roxinho` 0/1 column, then keeps only `roxinho === 1`.
-2. **🏷️ Derived flags** — 1/0 product columns:
+2. **💜 Nubank customer tier** (BR-only) — one filter per tier. Each joins the tier's `customer__id` lookup, builds a 1/0 column, and keeps only matched rows (`.where($"<col>" === 1)`). Ticking more than one ANDs them. Tiers (see `CUSTOMER_TIERS` in `lib.py`):
+   - **Roxinho** → `nu-br/dataset/current-roxinho-customers` (col `roxinho`)
+   - **Ultravioleta (UV)** → `nu-br/dataset/current-uv-customers` (col `uv`)
+   - **Nubank+** → `nu-br/dataset/current-nu-plus-customers` (col `nu_plus`)
+   - **Under 18 (U18)** → `nu-br/dataset/current-underage-customers-ids` (col `u18`)
+3. **🏷️ Derived flags** — 1/0 product columns:
    - `is_cc` (credit card) and `is_ll` (lending). **If only one is ticked, the base is auto-filtered to that product.**
-3. **🎯 Segmentation**:
+4. **🎯 Segmentation**:
    - **lateness** — `short` / `long` with a configurable day cutoff.
    - **segment** — `cc_only` / `ll_only` / `multi_debt`; requires *both* product flags.
    - **Income segments** (BR-only) — joins `dataset/br-segments-v5` to attach `income_segments` (`mass_market` / `super_core` / `high_income`). Tick a strict subset to filter; tick all three to just attach the column.
    - **Split mode** — *Keep all segments*, *Filter to one segment*, or *Multi-save* (see [§7](#7-multi-save)).
-4. **🔒 Compliance** — the canonical `forbidden_tags` filter, country-specific (see [§5](#5-country-handling-br-vs-mx)).
-5. **💾 Output**:
+5. **🔒 Compliance** — the canonical `forbidden_tags` filter, country-specific (see [§5](#5-country-handling-br-vs-mx)).
+6. **💾 Output**:
    - **Columns to keep** — a multiselect listing *only currently-available columns* (prevents typos / "column not found" at runtime).
    - **Base sample size** — row cap via `.limit(n)`. In multi-save mode this becomes one input per resulting table.
 
@@ -154,7 +158,7 @@ Switching country in the sidebar **resets the checklist** to that country's defa
 | `prototype` | Enriched via inner join from `contract-customers/customers` | Native on the new datasets; also a groupBy key |
 | GroupBy | `groupBy("customer__id")`, `max(c).as(c)` | `groupBy("customer__id", "prototype")`, `maximo(c)` |
 | Forbidden tags | `FORBIDDEN_TAGS_BR` (27 tags), **exact match** via `containsAny` on exploded `customer__tags` from `contract-customers/customers` | `FORBIDDEN_TAGS_MX` (36 substrings), **case-insensitive substring match** via `instr` against `etl.mx__dataset.collections_daily_snapshot_sr_barriga` (`spark.table`, not `datasets()`) |
-| Roxinho enrichment | ✅ | ❌ auto-disabled (BR-only dataset) |
+| Nubank customer tiers | ✅ Roxinho / UV / Nubank+ / U18 | ❌ auto-disabled (BR-only datasets) |
 | Income segments | ✅ from `dataset/br-segments-v5` | ❌ auto-disabled (BR-only dataset) |
 | Default `days_late` max / lateness cutoff | 365 / 65 | 60 / 60 |
 
@@ -209,7 +213,7 @@ The entire app state is a **flat dict** stored at `st.session_state.config`, pro
 | `filter_customer_type` / `customer_type` | bool / `"person" \| "company"` | Customer-type filter. |
 | `filter_collection_end_null` | bool | Keep only open collections. |
 | `filter_cured_only` | bool | Keep only cured collections (`where collection__cured === 1`). |
-| `flag_roxinho` | bool | BR-only Roxinho-only filter (join + `where roxinho === 1`). |
+| `flag_roxinho` / `flag_uv` / `flag_nu_plus` / `flag_u18` | bool | BR-only Nubank customer tier filters (join + `where <col> === 1`). One per tier in `CUSTOMER_TIERS`. |
 | `flag_is_cc` / `flag_is_ll` | bool | Product flags. One alone also filters the base to that product. |
 | `segment_income` / `income_segment_values` | bool / list[str] | BR-only income segments; subset of `["mass_market", "super_core", "high_income"]`. Strict subset → filter; all three → attach only. |
 | `groupby_customer_id` | bool | Aggregation to one row per customer (per customer+prototype on MX). |
@@ -282,13 +286,13 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 2. **Datasets** — `val collectionsCc` / `val collectionsLl = datasets("<path>")` (the product dataset(s) the base needs, BR + MX) plus any conditionally-needed lookups:
    - `val customers` (BR: compliance and/or `prototype` enrichment)
    - `val srBarrigaDailySnapshot` (MX compliance, via `spark.table`)
-   - `val roxinhoCustomers` (`.select($"customer__id").distinct.withColumn("roxinho", lit(1))`)
+   - one `val <tier>Customers` per enabled Nubank customer tier (`.select($"customer__id").distinct.withColumn("<col>", lit(1))`) — e.g. `roxinhoCustomers`, `uvCustomers`, `nuPlusCustomers`, `u18Customers`
    - `val latestDate` + `val brSegments` (income segments: `income_month >= latestDate`, select, `dropDuplicates`)
 3. **Forbidden tags filter** (if enabled) — builds `val forbiddenTagsCustomers`:
    - BR: explode `customer__tags`, `containsAny` exact match, `groupBy` + `maximo`, keep flagged.
    - MX: lowercase tags, `EXISTS(..., instr(...) > 0)` substring match, distinct `customer__id`s.
 4. **Base** — `val base` built from the product dataset(s): a single tagged dataset, or `unionByName(collectionsCc[is_cc=1,is_ll=0], collectionsLl[is_cc=0,is_ll=1])` when both flags (or neither) are set. Then the chain: filters (including the cured-only `where`) → groupBy/agg → segment columns. Product flags are tagged at the source, so there's no separate flag-derivation or single-flag exclusivity step.
-5. **Save** (×1 or ×N) — per save: `base` → `leftanti` join on forbidden tags → enrichment joins → roxinho / income filters → lateness/segment `where` overrides → `.select(...)` → `.limit(n)` → `.save("name")`, followed by a `table("name").d` display cell.
+5. **Save** (×1 or ×N) — per save: `base` → `leftanti` join on forbidden tags → enrichment joins → customer-tier / income filters → lateness/segment `where` overrides → `.select(...)` → `.limit(n)` → `.save("name")`, followed by a `table("name").d` display cell.
 
 ---
 
@@ -315,7 +319,7 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 - BR `groupBy` with nothing to aggregate (`.agg()` will be skipped).
 - Sample size > 1,000,000 (globally or per table).
 - `cured collections only` combined with the open-collections filter (cured collections have usually ended, so the base is likely empty).
-- BR-only features (Roxinho, income segments) enabled while country is MX.
+- BR-only features (Nubank customer tiers, income segments) enabled while country is MX.
 - Multi-save producing only one table (equivalent to a single filtered save).
 - Selected columns not in `available_select_columns(cfg)` (likely typos).
 
@@ -327,7 +331,7 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 2. **Dedup discipline on right-side lookups.** Every dataset joined on `customer__id` must be deduped *before* the join, so a downstream (or upstream) `groupBy("customer__id")` is never re-inflated:
    - `customers` enrichment → `.dropDuplicates(Seq("customer__id"))`. The dataset is contract-level with **no date/recency column**; enriched columns like `prototype` are stable customer attributes, identical across a customer's rows, so deduping is safe.
    - `brSegments` → recency filter `income_month >= latestDate` (where `latestDate = collectionsCc.agg(max("date")).collect()(0).getDate(0)`) **plus** `.dropDuplicates(Seq("customer__id"))` as the safety net.
-   - `roxinhoCustomers` → `.select($"customer__id").distinct` before adding the constant `roxinho = 1`.
+   - Nubank customer tier lookups (`roxinhoCustomers`, `uvCustomers`, `nuPlusCustomers`, `u18Customers`) → `.select($"customer__id").distinct` before adding the constant `<col> = 1`.
 3. **Single-flag source selection** (only `is_cc` → read the CC dataset; only `is_ll` → read the LL dataset; both or neither → union of CC + LL) is intentional behavior, surfaced in the UI as the auto-resolved source caption.
 4. **Save-time vs base-time filtering.** Segment/lateness *columns* go on `val base`; segment/lateness *filters* go in `_render_one_save`. Don't move them.
 5. **`available_select_columns` must mirror the renderer.** If you add a column-producing feature, update both `available_select_columns` (UI options) and `_columns_produced_by_base` (enrichment detection), or the Output multiselect and the customers-join logic will drift from reality.
@@ -345,7 +349,7 @@ A generated `.scala` file is a Databricks notebook source with these sections (c
 3. **`lib.py`**: if the feature produces a column, update `available_select_columns` and (if it exists on `val base`) `_columns_produced_by_base`.
 4. **`lib.py`**: add validation (errors for broken combos, warnings for suspicious ones).
 5. **`lib.py`**: if the feature needs a lookup dataset, add a `_needs_*_dataset` helper, declare the `val` in `_render_datasets_block`, and **dedup it on the join key** (invariant #2).
-6. **`app.py`**: add the widget, writing straight into `cfg[...]`. Disable + force-off for unsupported countries (see the Roxinho pattern).
+6. **`app.py`**: add the widget via the keyed `w_*` helpers (source of truth is `session_state`, seeded from `cfg`). Disable + force-off for unsupported countries (see the Nubank customer tier pattern). For a whole new customer tier, just add an entry to `CUSTOMER_TIERS` in `lib.py` — the renderer, validation, columns and UI all iterate over it.
 7. Optionally update a template.
 
 ### Adding a new template
@@ -364,4 +368,4 @@ Add entries to `COLUMN_NAMES`, `KNOWN_DATASETS`, a forbidden-tags list + `forbid
 - **`FORBIDDEN_TAGS_BR` / `FORBIDDEN_TAGS_MX` are hardcoded** — drift risk over time. If this becomes shared tooling, move them to a versioned source of truth.
 - **Download-only** — no automatic upload to the workspace. The user imports the `.scala` manually via Databricks **File → Import**.
 - **No persistence** — all state lives in `st.session_state`; nothing survives a browser refresh or new session.
-- **MX uses the same split-source model as BR** (CC/LL daily datasets, union when both, native `product__days_late` and `collection__cured`, `prototype` carried through the `groupBy`). BR-only enrichments (Roxinho, income segments) remain auto-disabled in MX; the SR Barriga daily snapshot is used only as the `customer__tags` source for MX compliance.
+- **MX uses the same split-source model as BR** (CC/LL daily datasets, union when both, native `product__days_late` and `collection__cured`, `prototype` carried through the `groupBy`). BR-only features (Nubank customer tiers, income segments) remain auto-disabled in MX; the SR Barriga daily snapshot is used only as the `customer__tags` source for MX compliance.

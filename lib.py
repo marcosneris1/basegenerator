@@ -99,9 +99,32 @@ FORBIDDEN_TAGS_MX: list[str] = [
 #: customer tags for the MX forbidden_tags filter (no `datasets()` equivalent).
 MX_DAILY_SNAPSHOT_TABLE = "etl.mx__dataset.collections_daily_snapshot_sr_barriga"
 
-#: BR enrichment datasets — used by the Roxinho and income-segments features.
-ROXINHO_DATASET_BR = "nu-br/dataset/current-roxinho-customers"
+#: BR enrichment datasets — used by the income-segments feature.
 BR_SEGMENTS_DATASET = "dataset/br-segments-v5"
+
+# ---------------------------------------------------------------------------
+# Nubank customer tier datasets (BR-only)
+# ---------------------------------------------------------------------------
+# Each tier is a lookup of `customer__id`s. The "Only <tier>" filter joins the
+# dataset, builds a 0/1 column, and keeps only the matched rows
+# (`.where($"<col>" === 1)`) — the same rule the Roxinho filter always used.
+ROXINHO_DATASET_BR = "nu-br/dataset/current-roxinho-customers"
+UV_DATASET_BR = "nu-br/dataset/current-uv-customers"
+NU_PLUS_DATASET_BR = "nu-br/dataset/current-nu-plus-customers"
+U18_DATASET_BR = "nu-br/dataset/current-underage-customers-ids"
+
+#: Ordered registry of the customer tiers exposed in the UI. `flag` is the
+#: config key, `col` the produced 0/1 column, `var` the Scala val name.
+CUSTOMER_TIERS: list[dict] = [
+    {"flag": "flag_roxinho", "label": "Roxinho", "col": "roxinho",
+     "var": "roxinhoCustomers", "dataset": ROXINHO_DATASET_BR},
+    {"flag": "flag_uv", "label": "Ultravioleta (UV)", "col": "uv",
+     "var": "uvCustomers", "dataset": UV_DATASET_BR},
+    {"flag": "flag_nu_plus", "label": "Nubank+", "col": "nu_plus",
+     "var": "nuPlusCustomers", "dataset": NU_PLUS_DATASET_BR},
+    {"flag": "flag_u18", "label": "Under 18 (U18)", "col": "u18",
+     "var": "u18Customers", "dataset": U18_DATASET_BR},
+]
 
 # ---------------------------------------------------------------------------
 # BR core collections datasets — v2 migration (effective July 2026)
@@ -163,6 +186,9 @@ KNOWN_DATASETS: dict[str, dict[str, str]] = {
         "collections-renegotiations": "dataset/collections-renegotiations",
         "personal-loans": "contract-capo/personal-loans",
         "current-roxinho-customers": ROXINHO_DATASET_BR,
+        "current-uv-customers": UV_DATASET_BR,
+        "current-nu-plus-customers": NU_PLUS_DATASET_BR,
+        "current-underage-customers-ids": U18_DATASET_BR,
         "br-segments-v5": BR_SEGMENTS_DATASET,
     },
     "MX": {
@@ -315,8 +341,12 @@ def default_config(country: str = "BR") -> dict:
         "filter_collection_end_null": filter_collection_end_null,
         # Keep only cured collections (collection__cured === 1).
         "filter_cured_only": False,
-        # Roxinho-only filter (BR-only dataset join + keep matched rows).
+        # ----- Nubank customer tier filters (BR-only dataset join + keep
+        # matched rows, same rule as Roxinho). One flag per tier. -----
         "flag_roxinho": False,
+        "flag_uv": False,
+        "flag_nu_plus": False,
+        "flag_u18": False,
         # ----- Derived flags -----
         "flag_is_cc": False,
         "flag_is_ll": False,
@@ -487,8 +517,8 @@ def summarize_config(cfg: dict) -> list[str]:
         out.append("Only open collections (collection__end is null)")
     if cfg.get("filter_cured_only"):
         out.append("Cured collections only (collection__cured = 1)")
-    if cfg.get("flag_roxinho"):
-        out.append("Roxinho-only filter")
+    for tier in _selected_tiers(cfg):
+        out.append(f"Customer tier: {tier['label']} only")
 
     # ----- Derived flags -----
     cc, ll = cfg.get("flag_is_cc"), cfg.get("flag_is_ll")
@@ -606,9 +636,11 @@ def available_select_columns(cfg: dict) -> list[str]:
             if c not in cols:
                 cols.append(c)
 
-    # Roxinho flag — produced at save time from a left join + coalesce
-    if cfg.get("flag_roxinho") and "roxinho" not in cols:
-        cols.append("roxinho")
+    # Customer tier flags — each produces a 0/1 column at save time from a
+    # left join + coalesce (then filtered to 1).
+    for tier in _enabled_tiers(cfg):
+        if tier["col"] not in cols:
+            cols.append(tier["col"])
 
     # Income segments — categorical column attached from br-segments-v5
     # when the Income segments segmentation is on. Filtering by subset
@@ -781,12 +813,13 @@ def validate_config(cfg: dict) -> tuple[list[str], list[str]]:
         )
 
     # BR-only enrichments — warn if turned on for MX
-    if country == "MX" and cfg.get("flag_roxinho"):
-        warnings.append(
-            "Roxinho-only filter is on but the country is MX. The Roxinho dataset "
-            "(`nu-br/dataset/current-roxinho-customers`) is BR-only — disable this "
-            "or switch to BR."
-        )
+    if country == "MX":
+        for tier in _selected_tiers(cfg):
+            warnings.append(
+                f"'{tier['label']} only' filter is on but the country is MX. "
+                f"The dataset (`{tier['dataset']}`) is BR-only — disable this "
+                "or switch to BR."
+            )
     if country == "MX" and cfg.get("segment_income"):
         warnings.append(
             "Income segments segmentation is on but the country is MX. The dataset "
@@ -945,9 +978,21 @@ def _needs_mx_daily_snapshot(cfg: dict) -> bool:
     return cfg.get("country") == "MX" and bool(cfg.get("apply_forbidden_tags_filter"))
 
 
-def _needs_roxinho_dataset(cfg: dict) -> bool:
-    """BR-only: whether we need to declare `val roxinhoCustomers = ...`."""
-    return cfg.get("country") == "BR" and bool(cfg.get("flag_roxinho"))
+def _selected_tiers(cfg: dict) -> list[dict]:
+    """Customer tiers whose filter flag is on (regardless of country).
+
+    Used for the summary and the MX warning. Rendering uses `_enabled_tiers`,
+    which additionally requires BR (the tier datasets are BR-only).
+    """
+    return [t for t in CUSTOMER_TIERS if cfg.get(t["flag"])]
+
+
+def _enabled_tiers(cfg: dict) -> list[dict]:
+    """BR-only: customer tiers we should actually join/filter and declare a
+    `val <tier>Customers = ...` lookup for."""
+    if cfg.get("country") != "BR":
+        return []
+    return _selected_tiers(cfg)
 
 
 
@@ -1271,12 +1316,14 @@ def _render_one_save(
             L.append(f'    $"{c}"{comma}')
         L.append('  ).dropDuplicates(Seq("customer__id")), Seq("customer__id"))')
 
-    # Roxinho-only filter: left join + coalesce builds the 0/1 column,
-    # then `.where($"roxinho" === 1)` drops everyone who isn't in the list.
-    if _needs_roxinho_dataset(cfg):
-        L.append('  .join(roxinhoCustomers, Seq("customer__id"), "left")')
-        L.append('  .withColumn("roxinho", coalesce($"roxinho", lit(0)))')
-        L.append('  .where($"roxinho" === 1)')
+    # Nubank customer tier filters: for each enabled tier, left join + coalesce
+    # builds the 0/1 column, then `.where($"<col>" === 1)` drops everyone who
+    # isn't in that tier's list. Multiple tiers combine as AND.
+    for tier in _enabled_tiers(cfg):
+        col = tier["col"]
+        L.append(f'  .join({tier["var"]}, Seq("customer__id"), "left")')
+        L.append(f'  .withColumn("{col}", coalesce($"{col}", lit(0)))')
+        L.append(f'  .where($"{col}" === 1)')
 
     # Income segments: left join brings the `income_segments` column.
     # When the user selects a strict subset of the 3 values, also filter
@@ -1416,14 +1463,12 @@ def _render_datasets_block(cfg: dict) -> list[str]:
         # The MX daily snapshot lives outside the `datasets()` helper, accessed
         # via spark.table directly (matches what the team's notebooks do).
         L.append(f'val srBarrigaDailySnapshot = spark.table("{MX_DAILY_SNAPSHOT_TABLE}")')
-    if _needs_roxinho_dataset(cfg):
-        # Roxinho lookup: deduped customer__id list with a constant 1, so a
-        # left join + coalesce gives roxinho = 1 (matched) or 0 (unmatched).
-        L.append(
-            f'val roxinhoCustomers = datasets("{ROXINHO_DATASET_BR}")'
-        )
+    for tier in _enabled_tiers(cfg):
+        # Tier lookup: deduped customer__id list with a constant 1, so a left
+        # join + coalesce gives <col> = 1 (matched) or 0 (unmatched).
+        L.append(f'val {tier["var"]} = datasets("{tier["dataset"]}")')
         L.append('  .select($"customer__id").distinct')
-        L.append('  .withColumn("roxinho", lit(1))')
+        L.append(f'  .withColumn("{tier["col"]}", lit(1))')
     if _needs_br_segments_dataset(cfg):
         # MM income segments — recency is driven by `income_month` (the
         # reference month of the estimated income): grab the latest snapshot
